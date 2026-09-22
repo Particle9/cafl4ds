@@ -63,6 +63,7 @@ class StreamingLoop:
         monitor: HealthMonitor,
         run_logger: RunLogger,
         eval_every: int = 5,
+        update_every: int = 1,
         epochs: int = 1,
         scheduler: LRScheduler | None = None,
         grad_clip: float | None = 1.0,
@@ -79,6 +80,9 @@ class StreamingLoop:
             monitor: The health monitor read every ``eval_every`` (global) steps.
             run_logger: The run log receiving the loss and health series.
             eval_every: Run the monitor every this many steps (and always at the end).
+            update_every: Run one optimizer update every N incoming batches. ``1`` adapts on
+                every batch; ``4`` updates on stream steps 0, 4, 8, ... while still evaluating
+                the representation and era boundaries on the original stream clock.
             epochs: Number of passes over the stream. ``1`` (default) is the single-pass
                 streaming setting; ``>1`` re-iterates the same stream in the same order (the
                 multi-epoch calibration regime). Steps are numbered **globally** across epochs.
@@ -98,6 +102,9 @@ class StreamingLoop:
         self.monitor = monitor
         self.run_logger = run_logger
         self.eval_every = eval_every
+        if update_every < 1:
+            raise ValueError("update_every must be >= 1")
+        self.update_every = update_every
         self.epochs = epochs
         self.scheduler = scheduler
         self.grad_clip = grad_clip
@@ -126,13 +133,14 @@ class StreamingLoop:
                 if prev_era is not None and batch.era != prev_era:
                     self._probe_past(prev_era)  # the era just ended — record its probe-on-past row
                 prev_era, last_era = batch.era, batch.era
-                stats = self._step_on_batch(batch, step)
-                if stats is None:  # sub-minimum batch after selection — skipped
-                    continue
+                if step % self.update_every == 0:
+                    stats = self._step_on_batch(batch, step)
+                    if stats is None:  # sub-minimum batch after selection — skipped
+                        continue
+                    if not stats.finite:  # divergence (P0.4.0): stop on first non-finite step
+                        diverged = True
+                        break
                 last_step = step
-                if not stats.finite:  # divergence (P0.4.0): stop on the first non-finite step
-                    diverged = True
-                    break
                 if step % self.eval_every == 0:
                     self.run_logger.log_health(step, batch.era, self.monitor.measure(self.method, step))
             if diverged:
@@ -154,11 +162,12 @@ class StreamingLoop:
             (too few samples to run an update — the step is skipped).
         """
         moved = StreamBatch(images=batch.images.to(self.device), era=batch.era, step=step)
-        accepted = self.selection_filter.select(moved, FilterContext(method=self.method, step=step))
+        ctx = FilterContext(method=self.method, step=step)
+        accepted = self.selection_filter.select(moved, ctx)
         if accepted.shape[0] < _MIN_BATCH:
             logger.debug(f"step {step}: skipping batch of {accepted.shape[0]} (< {_MIN_BATCH}).")
             return None
-        stats = self._update(accepted)
+        stats = self._update(accepted, ctx)
         self.run_logger.log_loss(step, batch.era, stats.loss, grad_norm=stats.grad_norm, finite=stats.finite)
         if not stats.finite:
             # The loss or the gradient went non-finite. The per-step trace up to here is the
@@ -204,7 +213,7 @@ class StreamingLoop:
         finally:
             self.method.train(was_training)
 
-    def _update(self, images: torch.Tensor) -> UpdateStats:
+    def _update(self, images: torch.Tensor, ctx: FilterContext) -> UpdateStats:
         """Run one SSL optimization step on the accepted images.
 
         Captures the global L2 gradient norm **before** any clipping (the P0.4.0 divergence
@@ -213,13 +222,22 @@ class StreamingLoop:
 
         Args:
             images: The accepted image batch ``[K, C, H, W]``.
+            ctx: Selection context for an optional filter-owned auxiliary loss.
 
         Returns:
             The step's :class:`UpdateStats` (loss, pre-clip grad norm, finiteness).
         """
         self.method.train()
+        # Some constrained-adaptation arms deliberately preserve pretrained SSL heads. Merely
+        # disabling their gradients is insufficient for BatchNorm modules, whose running buffers
+        # otherwise keep changing in train mode.
+        for module in getattr(self.method, "_frozen_online_modules", ()):
+            module.eval()
         self.optimizer.zero_grad()
         loss = self.method.training_step(images)
+        auxiliary = self.selection_filter.auxiliary_loss(images, ctx)
+        if auxiliary is not None:
+            loss = loss + auxiliary
         loss.backward()
         grad_norm = self._grad_norm()
         if self.grad_clip is not None:

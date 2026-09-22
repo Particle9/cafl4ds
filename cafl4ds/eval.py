@@ -20,7 +20,10 @@ forget, so the matrix has one row and the forgetting metrics are ``None`` (undef
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TypedDict
+
+import torch
 
 from cafl4ds import measurements
 from cafl4ds.data.streams import EvalSet, EvalSets
@@ -60,6 +63,40 @@ def _probe(encode: Encoder, support: EvalSet, query: EvalSet, probe: str, knn_k:
     if probe == "linear":
         return measurements.linear_probe(encode, (support.images, support.labels), (query.images, query.labels))
     raise ValueError(f"probe must be 'knn' or 'linear'; got {probe!r}.")
+
+
+def few_shot_probe_curve(
+    encode: Encoder,
+    eval_sets: EvalSets,
+    shots: Sequence[int] = (1, 2, 5, 10, 20),
+    *,
+    probe: str = "linear",
+    knn_k: int = 20,
+) -> dict[int, float]:
+    """Evaluate a frozen encoder with balanced, nested support subsets.
+
+    Each point uses the first ``n`` examples of every class in the fixed probe-support split and
+    scores on the unchanged probe-query split. The subsets are deterministic, so an adapted/frozen
+    pair differs only through encoder features. Labels train only the readout, never the encoder.
+    """
+    support = eval_sets.probe_support
+    classes = sorted({int(label) for label in support.labels.tolist()})
+    curve: dict[int, float] = {}
+    for shot in shots:
+        if shot < 1:
+            raise ValueError(f"few-shot counts must be positive; got {shot}.")
+        selected: list[torch.Tensor] = []
+        for cls in classes:
+            indices = (support.labels == cls).nonzero(as_tuple=True)[0]
+            if indices.numel() < shot:
+                raise ValueError(
+                    f"class {cls} has {indices.numel()} support examples, fewer than requested {shot}-shot."
+                )
+            selected.append(indices[:shot])
+        idx = torch.cat(selected)
+        subset = EvalSet(support.images[idx], support.labels[idx])
+        curve[int(shot)] = _probe(encode, subset, eval_sets.probe_query, probe, knn_k)
+    return curve
 
 
 class PerEraProbe:

@@ -23,4 +23,7 @@ max_per_class: 120
 max_train_per_class: 80
 
 pretrain_dir: outputs/pretrain # checkpoints saved as <pretrain_dir>/<method_name>.pt
+# Optional whole-method checkpoint (encoder + SSL heads). This avoids replacing competent
+# pretrained heads with random heads when studying constrained online adaptation.
+full_method_path: null
 grad_clip: 1.0

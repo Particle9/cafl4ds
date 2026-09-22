@@ -15,9 +15,9 @@ Examples:
 
         uv run python scripts/run_harness.py -m ssl=mae,simsiam init=from_scratch,pretrained
 
-    Fastest network-free smoke::
+    Network-free CPU smoke with a gate-checked control horizon::
 
-        uv run python scripts/run_harness.py data=synthetic img_size=16 eval_every=3
+        uv run python scripts/run_harness.py --config-name harness_smoke
 
     The long-horizon leak check::
 

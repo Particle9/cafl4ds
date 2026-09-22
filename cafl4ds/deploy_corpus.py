@@ -307,9 +307,10 @@ def write_corpus(
     live_health = (
         first["arms"]["live"]["health"] if "live" in first["arms"] else next(iter(first["arms"].values()))["health"]
     )
+    study = str((manifest or {}).get("study", "P1.0.2"))
     provenance: dict[str, Any] = {
         "schema_version": CORPUS_SCHEMA_VERSION,
-        "study": "P1.0.2",
+        "study": study,
         "backbone_family": first["backbone_family"],
         "config": first["config"],
         "seeds": [seed for seed, _ in reports],
@@ -328,7 +329,7 @@ def write_corpus(
         "health_csv": _write_csv(directory / "health.csv", columns, rows),
         "segments": _write_json(
             directory / "segments.json",
-            {"study": "P1.0.2", "segments": segment_map(live_health, era_names=era_names, composition=composition)},
+            {"study": study, "segments": segment_map(live_health, era_names=era_names, composition=composition)},
         ),
         "trust": _write_json(directory / "trust.json", first["trust"]),
         "manifest": _write_json(directory / "manifest.json", provenance),

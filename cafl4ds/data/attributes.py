@@ -17,8 +17,10 @@ lets the whole rig — and its Tier-A wiring check — run from a fresh clone wi
 
 from __future__ import annotations
 
+import hashlib
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -174,7 +176,10 @@ class BDD100KSource(AttributeSource):
     they are resized to ``img_size`` (also the low-memory portability lever). Video is *not* used.
 
     Expected layout under ``bdd_root`` (the canonical BDD100K distribution):
-    ``images/100k/<split>/*.jpg`` and ``labels/bdd100k_labels_images_<split>.json`` — both overridable.
+    ``images/100k/<split>/*.jpg`` plus either the legacy
+    ``labels/bdd100k_labels_images_<split>.json``, modern
+    ``labels/det_20/det_<split>.json``, or a ``labels/<split>/*.json`` directory containing one
+    official-format record per image — all paths are overridable.
     """
 
     def __init__(
@@ -186,6 +191,9 @@ class BDD100KSource(AttributeSource):
         images_dir: str | None = None,
         labels_file: str | None = None,
         min_canary_count: int = 0,
+        partition_role: str | None = None,
+        warm_fraction: float = 0.2,
+        partition_seed: int = 0,
     ) -> None:
         """Configure the BDD100K source.
 
@@ -195,12 +203,20 @@ class BDD100KSource(AttributeSource):
             img_size: Side length to resize the native 1280x720 frames to.
             max_images: If set, keep at most this many (attribute-valid) images.
             images_dir: Override for the image directory (default ``<root>/images/100k/<split>``).
-            labels_file: Override for the attributes JSON (default
-                ``<root>/labels/bdd100k_labels_images_<split>.json``).
+            labels_file: Override for the attributes JSON or per-image JSON directory. By default,
+                the loader accepts either
+                the legacy ``<root>/labels/bdd100k_labels_images_<split>.json`` or modern
+                ``<root>/labels/det_20/det_<split>.json`` release layout, then falls back to
+                ``<root>/labels/<split>/*.json``.
             min_canary_count: Drop images whose **scene** (canary class) has fewer than this many
                 attribute-valid images. Real BDD has a long scene tail (e.g. ``tunnel`` ≈ a handful of
                 frames) that cannot support a balanced held-out probe; this keeps the canary to
                 probeable classes. ``0`` (default) keeps every observed scene — no change.
+            partition_role: Optional disjoint train partition: ``"warm"`` keeps the stationary
+                warm-up share and ``"stream"`` keeps its complement. ``None`` keeps all images.
+            warm_fraction: Fraction assigned to ``partition_role="warm"`` within every
+                ``(regime, scene)`` cell.
+            partition_seed: Seed mixed into the stable filename hash used for partitioning.
         """
         self.bdd_root = bdd_root
         self.split = split
@@ -209,6 +225,13 @@ class BDD100KSource(AttributeSource):
         self._images_dir = images_dir
         self._labels_file = labels_file
         self.min_canary_count = min_canary_count
+        if partition_role not in {None, "warm", "stream"}:
+            raise ValueError("partition_role must be null, 'warm', or 'stream'")
+        if not 0.0 < warm_fraction < 1.0:
+            raise ValueError("warm_fraction must be strictly between 0 and 1")
+        self.partition_role = partition_role
+        self.warm_fraction = warm_fraction
+        self.partition_seed = partition_seed
         self._num_canary = 0  # set on load (number of observed scenes)
         self._cache: AttributedImages | None = None
 
@@ -222,11 +245,19 @@ class BDD100KSource(AttributeSource):
         images_dir = (
             Path(self._images_dir) if self._images_dir else Path(self.bdd_root) / "images" / "100k" / self.split
         )
-        labels_file = (
-            Path(self._labels_file)
-            if self._labels_file
-            else Path(self.bdd_root) / "labels" / f"bdd100k_labels_images_{self.split}.json"
-        )
+        if self._labels_file:
+            labels_file = Path(self._labels_file)
+        else:
+            labels_root = Path(self.bdd_root) / "labels"
+            legacy = labels_root / f"bdd100k_labels_images_{self.split}.json"
+            modern = labels_root / "det_20" / f"det_{self.split}.json"
+            per_image = labels_root / self.split
+            if legacy.is_file():
+                labels_file = legacy
+            elif modern.is_file():
+                labels_file = modern
+            else:
+                labels_file = per_image
         return images_dir, labels_file
 
     def load(self) -> AttributedImages:
@@ -254,20 +285,22 @@ class BDD100KSource(AttributeSource):
                 f"BDD100K images not found at {images_dir}. Download the 100k images and arrange them "
                 "under <bdd_root>/images/100k/<split>/ (see docs/experiments/phase1/P1.0.2.md)."
             )
-        if not labels_file.is_file():
+        if not labels_file.is_file() and not labels_file.is_dir():
             raise FileNotFoundError(
-                f"BDD100K attributes JSON not found at {labels_file}. Download the labels and place them "
-                "under <bdd_root>/labels/ (or pass labels_file=)."
+                f"BDD100K attributes JSON not found at {labels_file}. Expected the legacy "
+                f"labels/bdd100k_labels_images_{self.split}.json or modern "
+                f"labels/det_20/det_{self.split}.json layout, or a labels/{self.split}/ directory "
+                "of per-image JSON records (or pass labels_file=)."
             )
-        records = json.loads(labels_file.read_text(encoding="utf-8"))
+        records = _iter_bdd_records(labels_file)
         # Collect (path, regime-tuple, scene, category-counts) for every attribute-valid, present image.
         valid: list[tuple[Path, tuple[str, str], str, dict[str, int]]] = []
         for rec in records:
-            attrs = rec.get("attributes", {})
-            timeofday, weather, scene = attrs.get("timeofday"), attrs.get("weather"), attrs.get("scene")
-            if timeofday in _UNKNOWN_ATTRS or weather in _UNKNOWN_ATTRS or scene in _UNKNOWN_ATTRS:
+            attributes = _driving_attributes(rec)
+            if attributes is None:
                 continue
-            path = images_dir / rec["name"]
+            timeofday, weather, scene = attributes
+            path = images_dir / _image_filename(rec)
             if not path.is_file():
                 continue
             valid.append((path, (timeofday, weather), scene, _count_categories(rec)))
@@ -276,8 +309,13 @@ class BDD100KSource(AttributeSource):
         if not valid:
             raise ValueError(f"no attribute-valid BDD100K images found under {images_dir}")
 
-        if self.min_canary_count > 0:
-            valid = _drop_rare_scenes(valid, self.min_canary_count)
+        valid = _filter_valid_records(
+            valid,
+            min_canary_count=self.min_canary_count,
+            partition_role=self.partition_role,
+            warm_fraction=self.warm_fraction,
+            partition_seed=self.partition_seed,
+        )
 
         regime_order, regime_id, regime_names = _rank_regimes({r for _, r, _, _ in valid})
         scene_id, canary_names = _index_scenes({s for _, _, s, _ in valid})
@@ -342,6 +380,51 @@ def _count_categories(record: dict[str, object]) -> dict[str, int]:
     return counts
 
 
+def _driving_attributes(record: dict[str, object]) -> tuple[str, str, str] | None:
+    """Return validated time-of-day, weather, and scene attributes."""
+    attrs = record.get("attributes", {})
+    if not isinstance(attrs, dict):
+        return None
+    timeofday, weather, scene = attrs.get("timeofday"), attrs.get("weather"), attrs.get("scene")
+    if not isinstance(timeofday, str) or not isinstance(weather, str) or not isinstance(scene, str):
+        return None
+    if timeofday in _UNKNOWN_ATTRS or weather in _UNKNOWN_ATTRS or scene in _UNKNOWN_ATTRS:
+        return None
+    return timeofday, weather, scene
+
+
+def _image_filename(record: dict[str, object]) -> str:
+    """Return a record's image filename, adding BDD's conventional suffix when omitted."""
+    name = str(record["name"])
+    return name if Path(name).suffix else f"{name}.jpg"
+
+
+def _iter_bdd_records(labels_path: Path) -> Iterator[dict[str, object]]:
+    """Read either an aggregate BDD label file or a directory of per-image records.
+
+    Some current mirrors preserve BDD's native one-JSON-per-image layout. Those records use a
+    suffix-free ``name`` and keep detection objects under ``frames[0].objects``; normalize both
+    details here so the rest of :class:`BDD100KSource` remains format-agnostic.
+    """
+    if labels_path.is_file():
+        records = json.loads(labels_path.read_text(encoding="utf-8"))
+        if not isinstance(records, list):
+            raise ValueError(f"expected a JSON list in aggregate BDD labels file {labels_path}")
+        yield from records
+        return
+
+    for path in sorted(labels_path.glob("*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(record, dict):
+            continue
+        frames = record.get("frames")
+        if "labels" not in record and isinstance(frames, list) and frames:
+            first = frames[0]
+            if isinstance(first, dict) and isinstance(first.get("objects"), list):
+                record["labels"] = first["objects"]
+        yield record
+
+
 def _drop_rare_scenes(
     valid: list[tuple[Path, tuple[str, str], str, dict[str, int]]], min_count: int
 ) -> list[tuple[Path, tuple[str, str], str, dict[str, int]]]:
@@ -371,6 +454,44 @@ def _drop_rare_scenes(
     if dropped:
         logger.info(f"BDD100KSource: dropped rare scenes below min_canary_count={min_count}: {dropped}")
     return [v for v in valid if v[2] in kept]
+
+
+def _filter_valid_records(
+    valid: list[tuple[Path, tuple[str, str], str, dict[str, int]]],
+    *,
+    min_canary_count: int,
+    partition_role: str | None,
+    warm_fraction: float,
+    partition_seed: int,
+) -> list[tuple[Path, tuple[str, str], str, dict[str, int]]]:
+    """Apply optional scene support and disjoint train-partition filters."""
+    if min_canary_count > 0:
+        valid = _drop_rare_scenes(valid, min_canary_count)
+    if partition_role is not None:
+        valid = _partition_by_cell(valid, partition_role, warm_fraction, partition_seed)
+    return valid
+
+
+def _partition_by_cell(
+    valid: list[tuple[Path, tuple[str, str], str, dict[str, int]]],
+    role: str,
+    warm_fraction: float,
+    seed: int,
+) -> list[tuple[Path, tuple[str, str], str, dict[str, int]]]:
+    """Make deterministic, disjoint warm/stream partitions within every regime/scene cell."""
+    cells: dict[tuple[tuple[str, str], str], list[tuple[Path, tuple[str, str], str, dict[str, int]]]] = {}
+    for item in valid:
+        cells.setdefault((item[1], item[2]), []).append(item)
+
+    selected: list[tuple[Path, tuple[str, str], str, dict[str, int]]] = []
+    for items in cells.values():
+        ordered = sorted(
+            items,
+            key=lambda item: hashlib.sha256(f"{seed}:{item[0].name}".encode()).digest(),
+        )
+        warm_count = min(len(ordered) - 1, max(1, round(len(ordered) * warm_fraction)))
+        selected.extend(ordered[:warm_count] if role == "warm" else ordered[warm_count:])
+    return selected
 
 
 def _index_scenes(scenes: set[str]) -> tuple[dict[str, int], dict[int, str]]:

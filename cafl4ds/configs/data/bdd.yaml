@@ -10,3 +10,8 @@ max_images: ${max_images}
 # gas stations, …) cannot support a balanced held-out probe. 0 keeps every scene. Override per run,
 # e.g. `data.min_canary_count=50` keeps the well-populated scenes (city street / highway / residential).
 min_canary_count: 0
+# Optional deterministic, cell-stratified train partition. The warm and stream roles are exact
+# complements under the same fraction/seed; null preserves the historical full-source behavior.
+partition_role: null
+warm_fraction: 0.2
+partition_seed: 20260921

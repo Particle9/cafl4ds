@@ -89,10 +89,16 @@ class STL10Source(DataSource):
                 "torchvision.datasets.STL10(root=..., split=..., download=True)."
             )
         ds = STL10(root=self.root, split=self.split, download=False)
-        images = torch.from_numpy(ds.data).float() / 255.0  # [N, 3, 96, 96]
         labels = torch.from_numpy(ds.labels).long()
         if self.max_per_class is not None:
-            images, labels = _subsample_per_class(images, labels, self.max_per_class)
+            # Select while the source is still uint8. This matters for STL-10's 100k-image
+            # unlabeled split: converting the entire array to float before applying a small
+            # experiment cap needlessly allocates more than 10 GiB.
+            keep = _subsample_indices(labels, self.max_per_class)
+            images = torch.from_numpy(ds.data[keep.numpy()]).float() / 255.0
+            labels = labels[keep]
+        else:
+            images = torch.from_numpy(ds.data).float() / 255.0  # [N, 3, 96, 96]
         images = F.interpolate(images, size=self.img_size, mode="bilinear", align_corners=False, antialias=True)
         logger.info(f"STL10Source: loaded {images.shape[0]} images ({self.split}) at {self.img_size}px")
         return images, labels
@@ -555,11 +561,16 @@ def _subsample_per_class(
     Returns:
         The subsampled ``(images, labels)``.
     """
+    idx = _subsample_indices(labels, max_per_class)
+    return images[idx], labels[idx]
+
+
+def _subsample_indices(labels: torch.Tensor, max_per_class: int) -> torch.Tensor:
+    """Return order-preserving indices capped to ``max_per_class`` for each label."""
     keep: list[int] = []
     counts: dict[int, int] = {}
     for i, y in enumerate(labels.tolist()):
         if counts.get(y, 0) < max_per_class:
             keep.append(i)
             counts[y] = counts.get(y, 0) + 1
-    idx = torch.tensor(keep, dtype=torch.long)
-    return images[idx], labels[idx]
+    return torch.tensor(keep, dtype=torch.long)

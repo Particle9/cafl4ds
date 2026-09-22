@@ -70,6 +70,15 @@ dev = [
     "pyarrow>=25.0.1",
 ]
 
+# Interactive analysis of experiment outputs. Install with:
+#   uv sync --extra cpu --group analysis
+analysis = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+]
+
 # Tools configs -------------------------------------------------------------------------------------------------------
 
 [tool.poe]

@@ -69,3 +69,9 @@ class CompositeSelector(Filter):
         if self.buffer is not None:
             images = self.buffer.observe(images, ctx)
         return images
+
+    def auxiliary_loss(self, images: torch.Tensor, ctx: FilterContext) -> torch.Tensor | None:
+        """Forward an optional regularization loss from the configured replay buffer."""
+        if self.buffer is None:
+            return None
+        return self.buffer.auxiliary_loss(images, ctx)

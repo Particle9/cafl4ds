@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 
-from cafl4ds.data.attributes import AttributeSource
+from cafl4ds.data.attributes import AttributedImages, AttributeSource
 from cafl4ds.data.streams import EvalSet, EvalSets, StreamBatch
 
 
@@ -87,6 +87,69 @@ def count_ordered_batches(order: list[tuple[int, int]], batch_size: int, drop_la
     return count
 
 
+def _reserve_global_eval(
+    attributed: AttributedImages,
+    support_per_canary: int,
+    query_per_canary: int,
+    generator: torch.Generator,
+    require_training_remainder: bool,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+    """Reserve balanced global support/query indices from one evaluation corpus."""
+    canary = attributed.canary
+    support_idx, query_idx = [], []
+    available = torch.ones(attributed.images.shape[0], dtype=torch.bool)
+    for cls in sorted(set(canary.tolist())):
+        cls_idx = (canary == cls).nonzero(as_tuple=True)[0]
+        perm = cls_idx[torch.randperm(cls_idx.numel(), generator=generator)]
+        need = support_per_canary + query_per_canary
+        too_small = perm.numel() < need or (require_training_remainder and perm.numel() == need)
+        if too_small:
+            raise ValueError(
+                f"canary class {cls} has {perm.numel()} images but {need} are reserved for probes; "
+                "reduce support_per_canary / query_per_canary or use more data."
+            )
+        support_idx.append(perm[:support_per_canary])
+        query_idx.append(perm[support_per_canary:need])
+        available[perm[:need]] = False
+    return support_idx, query_idx, available
+
+
+def _reserve_per_era_eval(
+    train_attributed: AttributedImages,
+    eval_attributed: AttributedImages,
+    requested: list[int],
+    available: torch.Tensor,
+    era_query_per_cell: int,
+    generator: torch.Generator,
+    require_training_remainder: bool,
+) -> dict[int, EvalSet]:
+    """Reserve condition queries, matching train and evaluation regimes by stable names."""
+    if era_query_per_cell == 0:
+        return {}
+    eval_regime_by_name = {name: regime for regime, name in eval_attributed.regime_names.items()}
+    per_era: dict[int, EvalSet] = {}
+    for era, regime in enumerate(requested):
+        eval_regime = eval_regime_by_name.get(train_attributed.regime_names[regime])
+        if eval_regime is None:
+            continue
+        era_indices: list[torch.Tensor] = []
+        for cls in sorted(set(eval_attributed.canary.tolist())):
+            candidates = (
+                (eval_attributed.era_key == eval_regime) & (eval_attributed.canary == cls) & available
+            ).nonzero(as_tuple=True)[0]
+            remainder = 1 if require_training_remainder else 0
+            take = min(era_query_per_cell, max(0, candidates.numel() - remainder))
+            if take:
+                perm = candidates[torch.randperm(candidates.numel(), generator=generator)]
+                chosen = perm[:take]
+                era_indices.append(chosen)
+                available[chosen] = False
+        if era_indices:
+            idx = torch.cat(era_indices)
+            per_era[era] = EvalSet(eval_attributed.images[idx], eval_attributed.canary[idx])
+    return per_era
+
+
 class RegimeStream:
     """A single-pass diet that orders images by driving regime and probes an orthogonal canary axis.
 
@@ -99,11 +162,13 @@ class RegimeStream:
     def __init__(
         self,
         source: AttributeSource,
+        evaluation_source: AttributeSource | None = None,
         batch_size: int = 32,
         regime_order: list[int] | None = None,
         block_size: int | None = None,
         support_per_canary: int = 10,
         query_per_canary: int = 10,
+        era_query_per_cell: int = 0,
         max_train_per_regime: int | None = None,
         drop_last: bool = False,
         seed: int = 0,
@@ -113,6 +178,9 @@ class RegimeStream:
 
         Args:
             source: The attributed data source (two axes: era-key regime + canary).
+            evaluation_source: Optional independent source used only for probe support/query and
+                condition queries. When supplied, every image in ``source`` remains eligible for
+                online training and no evaluation image can enter the update stream.
             batch_size: Images per delivered batch.
             regime_order: Explicit regime walk order; defaults to the source's shift-walk order.
             block_size: Correlation knob — ``None`` delivers each regime contiguously (maximal
@@ -121,6 +189,13 @@ class RegimeStream:
                 correlation with a shrinking effective batch.
             support_per_canary: Images per canary class reserved for the probe support set.
             query_per_canary: Images per canary class reserved for the probe query / drift set.
+            era_query_per_cell: Maximum additional images reserved from every ``(regime, canary)`` cell
+                for condition-specific probe queries. A positive value enables probe-on-past:
+                after each regime, the same global probe support is scored on the current and all
+                earlier regime-specific queries. These images are disjoint from training and the
+                global support/query sets. Sparse or absent cells contribute fewer images, while at
+                least one available image remains for training. ``0`` preserves the deployment-only
+                reservation.
             max_train_per_regime: If set, cap the training images per regime (bounds run length).
             drop_last: Whether to drop the final short batch.
             seed: RNG seed for the **within-regime shuffle** (frame order inside each era, and — with
@@ -139,6 +214,8 @@ class RegimeStream:
         """
         if block_size is not None and block_size < 1:
             raise ValueError(f"block_size must be a positive integer; got {block_size}.")
+        if era_query_per_cell < 0:
+            raise ValueError(f"era_query_per_cell must be non-negative; got {era_query_per_cell}.")
         self.batch_size = batch_size
         self.block_size = block_size
         self.drop_last = drop_last
@@ -153,31 +230,40 @@ class RegimeStream:
         era_key, canary = attributed.era_key, attributed.canary
         self._canary = canary
 
+        eval_attributed = evaluation_source.load() if evaluation_source is not None else attributed
+        eval_images = eval_attributed.images
+        eval_canary = eval_attributed.canary
+        self.eval_num_canary_classes = len(set(eval_canary.tolist()))
+
         # Reserve a balanced held-out probe set on the canary axis; the rest is the training pool.
         # The reservation draws from `reserve_generator` (seeded by `canary_seed`, not the drive
         # `seed`), so the probe set is identical across every drive and the warm well — never a
         # per-drive split that would let a later drive train on an earlier drive's probe images.
-        support_idx, query_idx, train_mask = [], [], torch.ones(self._images.shape[0], dtype=torch.bool)
-        for cls in sorted(set(canary.tolist())):
-            cls_idx = (canary == cls).nonzero(as_tuple=True)[0]
-            perm = cls_idx[torch.randperm(cls_idx.numel(), generator=reserve_generator)]
-            need = support_per_canary + query_per_canary
-            if perm.numel() <= need:
-                raise ValueError(
-                    f"canary class {cls} has {perm.numel()} images but {need} are reserved for probes; "
-                    "reduce support_per_canary / query_per_canary or use more data."
-                )
-            support_idx.append(perm[:support_per_canary])
-            query_idx.append(perm[support_per_canary:need])
-            train_mask[perm[:need]] = False
+        requested = regime_order if regime_order is not None else attributed.regime_order
+        internal_eval = evaluation_source is None
+        support_idx, query_idx, eval_available = _reserve_global_eval(
+            eval_attributed,
+            support_per_canary,
+            query_per_canary,
+            reserve_generator,
+            require_training_remainder=internal_eval,
+        )
+        per_era_eval = _reserve_per_era_eval(
+            attributed,
+            eval_attributed,
+            requested,
+            eval_available,
+            era_query_per_cell,
+            reserve_generator,
+            require_training_remainder=internal_eval,
+        )
+        train_mask = eval_available if internal_eval else torch.ones(self._images.shape[0], dtype=torch.bool)
 
         self._eval_sets = EvalSets(
-            probe_support=EvalSet(self._images[torch.cat(support_idx)], canary[torch.cat(support_idx)]),
-            probe_query=EvalSet(self._images[torch.cat(query_idx)], canary[torch.cat(query_idx)]),
-            per_era={},
+            probe_support=EvalSet(eval_images[torch.cat(support_idx)], eval_canary[torch.cat(support_idx)]),
+            probe_query=EvalSet(eval_images[torch.cat(query_idx)], eval_canary[torch.cat(query_idx)]),
+            per_era=per_era_eval,
         )
-
-        requested = regime_order if regime_order is not None else attributed.regime_order
         self._regime_order = requested
         self._order_stream = self._build_order(era_key, train_mask, requested, max_train_per_regime)
 

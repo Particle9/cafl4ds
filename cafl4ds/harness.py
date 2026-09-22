@@ -27,6 +27,7 @@ degradation* is the mode studies' job (P1.3 / P1.4).
 
 from __future__ import annotations
 
+import importlib
 import math
 import os
 from collections.abc import Iterable, Sequence
@@ -101,6 +102,7 @@ def run_stream_arm(
     monitor: HealthMonitor,
     out_dir: str | Path,
     eval_every: int = 5,
+    update_every: int = 1,
     epochs: int = 1,
     scheduler: LRScheduler | None = None,
     grad_clip: float | None = 1.0,
@@ -123,6 +125,7 @@ def run_stream_arm(
         monitor: The health monitor read every ``eval_every`` steps.
         out_dir: Directory the arm's run log is written to.
         eval_every: Monitor cadence (steps).
+        update_every: Optimizer cadence on the incoming-batch clock. ``1`` updates every batch.
         epochs: Passes over the stream (``>1`` for the multi-epoch collapse-PC horizon).
         scheduler: Optional per-step LR scheduler.
         grad_clip: Global grad-norm clip, or ``None`` to disable.
@@ -142,6 +145,7 @@ def run_stream_arm(
         monitor=monitor,
         run_logger=run_logger,
         eval_every=eval_every,
+        update_every=update_every,
         epochs=epochs,
         scheduler=scheduler,
         grad_clip=grad_clip,
@@ -332,11 +336,14 @@ def rss_mb() -> float:
     try:
         with open("/proc/self/statm", encoding="utf-8") as f:
             resident_pages = int(f.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+        sysconf = getattr(os, "sysconf", None)
+        if not callable(sysconf):
+            raise OSError("os.sysconf is unavailable")
+        return float(resident_pages * int(sysconf("SC_PAGE_SIZE")) / (1024 * 1024))
     except (FileNotFoundError, IndexError, ValueError, OSError):
-        import resource  # noqa: PLC0415 — POSIX-only fallback, imported lazily
-
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        resource = importlib.import_module("resource")
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        return float(usage.ru_maxrss) / 1024
 
 
 def leak_report(rss_samples: list[float], *, growth_frac_max: float) -> dict[str, Any]:

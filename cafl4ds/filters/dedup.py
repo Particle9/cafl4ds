@@ -64,6 +64,8 @@ class SemDeDup(Filter):
                 the near-identical ones; raise toward ``1.0`` to dedup less aggressively.
         """
         self.threshold = threshold
+        self.seen_images = 0
+        self.kept_images = 0
 
     def select(self, batch: StreamBatch, ctx: FilterContext) -> torch.Tensor:
         """Encode the batch with the live model and return its near-duplicate-free subset.
@@ -77,4 +79,14 @@ class SemDeDup(Filter):
         """
         embeddings = ctx.method.encode(batch.images)  # [B, d], no grad
         keep = semantic_dedup_keep(embeddings, self.threshold)
+        self.seen_images += batch.images.shape[0]
+        self.kept_images += keep.numel()
         return batch.images[keep]
+
+    def stats(self) -> dict[str, float | int]:
+        """Return cumulative admission counts for experiment provenance."""
+        return {
+            "seen_images": self.seen_images,
+            "kept_images": self.kept_images,
+            "keep_fraction": self.kept_images / self.seen_images if self.seen_images else 0.0,
+        }

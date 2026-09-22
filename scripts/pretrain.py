@@ -26,6 +26,7 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from cafl4ds.ssl.base import save_encoder_checkpoint
+from cafl4ds.warmup import save_well
 
 logger.remove()
 logger.add(sys.stdout, level="INFO")
@@ -63,6 +64,8 @@ def main(config: DictConfig) -> None:
 
     out = Path(to_absolute_path(config.pretrain_dir)) / f"{method.name}.pt"
     save_encoder_checkpoint(method.encoder, out)
+    if config.get("full_method_path"):
+        save_well(method, to_absolute_path(str(config.full_method_path)))
 
 
 if __name__ == "__main__":

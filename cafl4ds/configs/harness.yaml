@@ -5,7 +5,7 @@
 # The full 2x2 C x I STL-10 smoke (the rig runs, instruments move in the right direction, the PC
 # fires, nothing NaNs):
 #   uv run python scripts/run_harness.py -m ssl=mae,simsiam init=from_scratch,pretrained
-# Fastest network-free smoke: append `data=synthetic img_size=16`.
+# Network-free gate-checked smoke: use `--config-name harness_smoke`.
 # The long-horizon leak check (resampled-image stream, extended horizon):
 #   uv run python scripts/run_harness.py data=synthetic long_horizon=true
 defaults:

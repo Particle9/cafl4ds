@@ -61,6 +61,16 @@ class Filter(ABC):
             batch, possibly empty).
         """
 
+    def auxiliary_loss(self, images: torch.Tensor, ctx: FilterContext) -> torch.Tensor | None:
+        """Return an optional training regularizer associated with the selected batch.
+
+        Selection filters normally return ``None``. Replay implementations may use this hook
+        to constrain replayed examples while keeping the primary SSL objective and optimizer
+        step in the streaming loop unchanged.
+        """
+        del images, ctx
+        return None
+
 
 class ReplayBuffer(ABC):
     """Stores incoming images and emits the batch the SSL update trains on (the replay role).
@@ -83,3 +93,8 @@ class ReplayBuffer(ABC):
             The training batch ``[M, C, H, W]`` — typically the incoming images plus a replay
             sample drawn from the buffer's stored history (``M >= K``).
         """
+
+    def auxiliary_loss(self, images: torch.Tensor, ctx: FilterContext) -> torch.Tensor | None:
+        """Return an optional replay regularizer for the most recent :meth:`observe` call."""
+        del images, ctx
+        return None
