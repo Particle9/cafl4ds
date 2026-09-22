@@ -59,6 +59,57 @@ def test_eval_sets_are_balanced_on_the_canary_axis_and_disjoint() -> None:
     assert sup.isdisjoint(qry)
 
 
+def test_condition_queries_are_balanced_and_disjoint_from_training() -> None:
+    """Optional per-regime queries cover every canary and never enter the training stream."""
+    stream = RegimeStream(
+        _source(),
+        batch_size=8,
+        support_per_canary=5,
+        query_per_canary=5,
+        era_query_per_cell=2,
+    )
+    assert set(stream.eval_sets.per_era) == {0, 1, 2}
+    held_out = set()
+    for query in stream.eval_sets.per_era.values():
+        assert {int(label) for label in query.labels} == {0, 1, 2}
+        assert all(int((query.labels == label).sum()) == 2 for label in (0, 1, 2))
+        held_out |= {tuple(image.flatten().tolist()) for image in query.images}
+    training = {tuple(image.flatten().tolist()) for batch in stream for image in batch.images}
+    assert held_out.isdisjoint(training)
+
+
+def test_independent_evaluation_source_keeps_all_training_images_and_eval_disjoint() -> None:
+    """An external eval split supplies probes without reserving or leaking into the train stream."""
+    train = SyntheticAttributeSource(
+        num_regimes=3, num_canary_classes=3, per_cell=20, img_size=12, long_tail=False, seed=1
+    )
+    evaluation = SyntheticAttributeSource(
+        num_regimes=3, num_canary_classes=3, per_cell=12, img_size=12, long_tail=False, seed=2
+    )
+    stream = RegimeStream(
+        train,
+        evaluation_source=evaluation,
+        batch_size=16,
+        support_per_canary=3,
+        query_per_canary=3,
+        era_query_per_cell=2,
+    )
+
+    assert sum(batch.images.shape[0] for batch in stream) == train.load().images.shape[0]
+    assert stream.eval_num_canary_classes == 3
+    training = {tuple(image.flatten().tolist()) for batch in stream for image in batch.images}
+    held_out = {
+        tuple(image.flatten().tolist())
+        for eval_set in (
+            stream.eval_sets.probe_support,
+            stream.eval_sets.probe_query,
+            *stream.eval_sets.per_era.values(),
+        )
+        for image in eval_set.images
+    }
+    assert training.isdisjoint(held_out)
+
+
 def test_default_walk_delivers_eras_contiguously_in_order() -> None:
     """With no block_size, batches walk the regimes in order, each era a contiguous run."""
     stream = RegimeStream(_source(), batch_size=8, support_per_canary=5, query_per_canary=5)

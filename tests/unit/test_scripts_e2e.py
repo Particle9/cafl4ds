@@ -122,3 +122,12 @@ def test_run_harness_writes_the_canonical_comparison(tmp_path: Path) -> None:
     assert comparison["schema_version"] == 1
     assert set(comparison["arms"]) == {"live", "pc", "b5"}
     assert "gate" in comparison and "directional" in comparison
+
+
+def test_synthetic_smoke_profile_passes_collapse_gate(tmp_path: Path) -> None:
+    """The advertised CPU smoke must trigger the PC gate, not merely write its schema."""
+    script = _load_script("run_harness")
+    comparison = script._run_smoke(_compose("harness_smoke", []), tmp_path)
+    assert comparison["gate"]["passed"], comparison["gate"]
+    assert comparison["finite"]
+    assert comparison["directional"]["drift_accumulated"]

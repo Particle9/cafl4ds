@@ -7,6 +7,7 @@ backbones. Uses the network-free synthetic source so the test is self-contained.
 
 from pathlib import Path
 
+import pytest
 import torch
 
 from cafl4ds.data.sources import SyntheticSource
@@ -175,3 +176,59 @@ def test_multi_epoch_with_scheduler_numbers_steps_globally(tmp_path: Path) -> No
     assert max(loss_steps) >= 2 * batches_per_epoch  # steps span past the first epoch (global numbering)
     assert len(loss_steps) == len(set(loss_steps))  # no duplicate step ids across epochs
     assert optimizer.param_groups[0]["lr"] < 1e-3  # cosine decayed the LR below the base by the end
+
+
+def test_update_every_thins_updates_without_thinning_health_clock(tmp_path: Path) -> None:
+    """Sparse adaptation updates retain the original stream/evaluation step grid."""
+    torch.manual_seed(0)
+    encoder = TinyViTEncoder(img_size=16, patch_size=8, embed_dim=32, depth=2, num_heads=2)
+    method = build_simsiam(encoder)
+    stream = EraStream(
+        SyntheticSource(num_classes=3, per_class=48, img_size=16),
+        batch_size=12,
+        order="iid",
+        support_per_class=8,
+        query_per_class=8,
+        era_eval_per_class=5,
+    )
+    run_logger = RunLogger(str(tmp_path / "cadence.jsonl"), run_name="cadence")
+    StreamingLoop(
+        stream=stream,
+        method=method,
+        optimizer=torch.optim.AdamW(method.parameters(), lr=1e-3),
+        selection_filter=AcceptAll(),
+        monitor=HealthMonitor(stream.eval_sets, knn_k=5),
+        run_logger=run_logger,
+        eval_every=1,
+        update_every=4,
+    ).run()
+
+    records = read_run(str(tmp_path / "cadence.jsonl"))
+    loss_steps = [int(r["step"]) for r in records if r["series"] == "loss"]
+    health_steps = [int(r["step"]) for r in records if r["series"] == "health"]
+    assert loss_steps == list(range(0, len(stream), 4))
+    assert health_steps == list(range(len(stream)))
+
+
+def test_update_every_must_be_positive(tmp_path: Path) -> None:
+    """A zero cadence is rejected instead of silently disabling adaptation."""
+    torch.manual_seed(0)
+    encoder = TinyViTEncoder(img_size=16, patch_size=8, embed_dim=32, depth=2, num_heads=2)
+    method = build_simsiam(encoder)
+    stream = EraStream(
+        SyntheticSource(num_classes=2, per_class=20, img_size=16),
+        batch_size=4,
+        support_per_class=2,
+        query_per_class=2,
+        era_eval_per_class=2,
+    )
+    with pytest.raises(ValueError, match="update_every"):
+        StreamingLoop(
+            stream=stream,
+            method=method,
+            optimizer=torch.optim.AdamW(method.parameters(), lr=1e-3),
+            selection_filter=AcceptAll(),
+            monitor=HealthMonitor(stream.eval_sets, knn_k=3),
+            run_logger=RunLogger(str(tmp_path / "bad.jsonl"), run_name="bad"),
+            update_every=0,
+        )

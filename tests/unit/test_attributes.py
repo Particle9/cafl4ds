@@ -147,6 +147,39 @@ def test_bdd_source_parses_layout_and_maps_both_axes(tmp_path: Path) -> None:
     assert a.canary_names[0] == "city street"  # sorted
 
 
+def test_bdd_source_accepts_modern_det20_label_layout(tmp_path: Path) -> None:
+    """The current Detection 2020 archive works without renaming its det_val.json file."""
+    records: list[dict[str, object]] = [
+        {"name": "a.jpg", "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"}}
+    ]
+    _write_bdd_fixture(tmp_path, records, split="val")
+    modern_dir = tmp_path / "labels" / "det_20"
+    modern_dir.mkdir()
+    (tmp_path / "labels" / "bdd100k_labels_images_val.json").replace(modern_dir / "det_val.json")
+
+    loaded = BDD100KSource(str(tmp_path), split="val", img_size=16).load()
+    assert loaded.images.shape == (1, 3, 16, 16)
+
+
+def test_bdd_source_accepts_per_image_label_directory(tmp_path: Path) -> None:
+    """A native one-record-per-image mirror is normalized without an aggregate conversion."""
+    images_dir = tmp_path / "images" / "100k" / "train"
+    labels_dir = tmp_path / "labels" / "train"
+    images_dir.mkdir(parents=True)
+    labels_dir.mkdir(parents=True)
+    Image.new("RGB", (32, 24), color=(100, 50, 50)).save(images_dir / "frame-1.jpg")
+    record = {
+        "name": "frame-1",
+        "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"},
+        "frames": [{"objects": [{"category": "car"}, {"category": "car"}, {"category": "person"}]}],
+    }
+    (labels_dir / "frame-1.json").write_text(json.dumps(record), encoding="utf-8")
+
+    loaded = BDD100KSource(str(tmp_path), img_size=16).load()
+    assert loaded.images.shape == (1, 3, 16, 16)
+    assert loaded.object_categories == [{"car": 2, "person": 1}]
+
+
 def test_bdd_source_counts_detection_categories_per_image(tmp_path: Path) -> None:
     """The detection boxes are aggregated into per-image category counts aligned to the images."""
     records: list[dict[str, object]] = [
@@ -215,6 +248,47 @@ def test_bdd_source_drops_rare_canary_scenes_below_min_count(tmp_path: Path) -> 
     assert src.num_canary_classes == 1
     assert set(filtered.canary_names.values()) == {"city street"}
     assert filtered.images.shape[0] == 5
+
+
+def test_bdd_warm_and_stream_partitions_are_disjoint_complements_per_cell(tmp_path: Path) -> None:
+    """The clean 20/80 split covers every image exactly once and preserves every populated cell."""
+    records: list[dict[str, object]] = []
+    for regime, (timeofday, weather) in enumerate((("daytime", "clear"), ("night", "rainy"))):
+        for scene_index, scene in enumerate(("city street", "highway")):
+            for index in range(10):
+                records.append(
+                    {
+                        "name": f"r{regime}_s{scene_index}_{index}.png",
+                        "attributes": {"timeofday": timeofday, "weather": weather, "scene": scene},
+                    }
+                )
+    _write_bdd_fixture(tmp_path, records)
+    for index, record in enumerate(records):
+        Image.new("RGB", (8, 8), color=(index, index, index)).save(
+            tmp_path / "images" / "100k" / "train" / str(record["name"])
+        )
+
+    warm = BDD100KSource(
+        bdd_root=str(tmp_path), img_size=8, warm_fraction=0.2, partition_seed=7, partition_role="warm"
+    ).load()
+    stream = BDD100KSource(
+        bdd_root=str(tmp_path), img_size=8, warm_fraction=0.2, partition_seed=7, partition_role="stream"
+    ).load()
+    warm_images = {image.numpy().tobytes() for image in warm.images}
+    stream_images = {image.numpy().tobytes() for image in stream.images}
+
+    assert warm.images.shape[0] == 8
+    assert stream.images.shape[0] == 32
+    assert warm_images.isdisjoint(stream_images)
+    assert set(warm.era_key.tolist()) == set(stream.era_key.tolist()) == {0, 1}
+    assert set(warm.canary.tolist()) == set(stream.canary.tolist()) == {0, 1}
+
+
+@pytest.mark.parametrize("role", ["bad", "validation"])
+def test_bdd_source_rejects_unknown_partition_role(tmp_path: Path, role: str) -> None:
+    """A mistyped partition role cannot silently leak or discard data."""
+    with pytest.raises(ValueError, match="partition_role"):
+        BDD100KSource(str(tmp_path), partition_role=role)
 
 
 def test_bdd_source_raises_on_missing_root(tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ stands in for the live model so the embedding / per-sample-loss inputs are contr
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from cafl4ds.data.streams import StreamBatch
@@ -16,7 +17,7 @@ from cafl4ds.filters.base import Filter, FilterContext
 from cafl4ds.filters.composite import CompositeSelector
 from cafl4ds.filters.dedup import SemDeDup, semantic_dedup_keep
 from cafl4ds.filters.loss_gate import LossGate
-from cafl4ds.filters.reservoir import ReservoirReplay
+from cafl4ds.filters.reservoir import FeatureDistillationReservoirReplay, ReservoirReplay
 
 
 class _StubMethod:
@@ -71,9 +72,11 @@ def test_semdedup_filter_returns_deduplicated_images() -> None:
     """The filter maps its embedding-space keep-set back onto the incoming images."""
     embeddings = torch.stack([torch.tensor([1.0, 0.0]), torch.tensor([1.0, 0.01]), torch.tensor([0.0, 1.0])])
     batch = _tagged_batch(3)
-    kept = SemDeDup(threshold=0.9).select(batch, _ctx(_StubMethod(embeddings=embeddings)))
+    dedup = SemDeDup(threshold=0.9)
+    kept = dedup.select(batch, _ctx(_StubMethod(embeddings=embeddings)))
     assert kept.shape[0] == 2
     assert [int(img[0, 0, 0]) for img in kept] == [0, 2]  # rows 0 and 2 survived, in order
+    assert dedup.stats() == {"seen_images": 3, "kept_images": 2, "keep_fraction": 2 / 3}
 
 
 # --- loss-gate -----------------------------------------------------------------------------
@@ -132,6 +135,77 @@ def test_reservoir_algorithm_r_is_uniform() -> None:
     # Deterministic (seeds 0..trials-1); a generous band around the uniform expectation.
     assert counts.min() >= 0.55 * expected
     assert counts.max() <= 1.45 * expected
+
+
+def test_reservoir_compute_cap_displaces_current_but_ingests_everything() -> None:
+    """Compute-matched replay holds training size fixed without hiding arrivals from storage."""
+    res = ReservoirReplay(capacity=16, replay_batch=2, max_train_batch=4, seed=0)
+    first = res.observe(_tagged_batch(4).images, _ctx(_StubMethod()))
+    assert first.shape[0] == 4
+    second = res.observe(_tagged_batch(4).images + 10, _ctx(_StubMethod()))
+    assert second.shape[0] == 4  # two current + two replay, rather than four + two
+    assert all(int(img[0, 0, 0]) >= 10 for img in second[:2])
+    assert all(int(img[0, 0, 0]) < 10 for img in second[2:])
+    assert len(res._buffer) == 8  # all new arrivals were ingested, not only the trained two
+
+
+def test_reservoir_compute_cap_rejects_impossible_budget() -> None:
+    """The replay allocation cannot exceed the total compute-matched batch budget."""
+    try:
+        ReservoirReplay(capacity=8, replay_batch=5, max_train_batch=4)
+    except ValueError:
+        return
+    raise AssertionError("replay_batch > max_train_batch should have raised")
+
+
+class _EmbeddingEncoder(torch.nn.Module):  # type: ignore[misc]
+    """Small differentiable encoder for cached-feature replay tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = torch.nn.Linear(4, 3, bias=False)
+
+    def embed(self, images: torch.Tensor) -> torch.Tensor:
+        return self.proj(images.flatten(1))
+
+
+class _FeatureMethod:
+    def __init__(self) -> None:
+        self.encoder = _EmbeddingEncoder()
+
+
+def test_feature_distillation_replay_caches_aligned_targets_and_gradients() -> None:
+    """Replay targets stay aligned with images and produce a differentiable drift penalty."""
+    torch.manual_seed(4)
+    method = _FeatureMethod()
+    replay = FeatureDistillationReservoirReplay(
+        capacity=8,
+        replay_batch=2,
+        max_train_batch=4,
+        distill_weight=2.0,
+        seed=3,
+    )
+    first = torch.randn(4, 1, 2, 2)
+    assert replay.observe(first, _ctx(method)).shape[0] == 4
+    second = torch.randn(4, 1, 2, 2)
+    training = replay.observe(second, _ctx(method))
+    assert training.shape[0] == 4
+
+    with torch.no_grad():
+        method.encoder.proj.weight[0, 0] += 0.5
+    penalty = replay.auxiliary_loss(training, _ctx(method))
+    assert penalty is not None and float(penalty.detach()) > 0.0
+    penalty.backward()
+    assert method.encoder.proj.weight.grad is not None
+    stats = replay.stats()
+    assert stats["distill_steps"] == 1
+    assert stats["replayed_images"] == 2
+
+
+def test_feature_distillation_replay_rejects_negative_weight() -> None:
+    """A negative regularization weight is invalid rather than silently destabilizing training."""
+    with pytest.raises(ValueError, match="distill_weight"):
+        FeatureDistillationReservoirReplay(distill_weight=-0.1)
 
 
 # --- composition ---------------------------------------------------------------------------

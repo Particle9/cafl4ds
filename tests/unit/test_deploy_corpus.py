@@ -234,6 +234,15 @@ def test_write_corpus_skips_parquet_without_pyarrow(tmp_path: Path, monkeypatch:
     assert (tmp_path / "health.csv").exists()
 
 
+def test_write_corpus_propagates_study_name(tmp_path: Path) -> None:
+    """A downstream study can reuse the corpus schema without being mislabeled P1.0.2."""
+    paths = write_corpus(tmp_path, reports=[(0, _report())], manifest={"study": "P1.2"})
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    segments = json.loads(paths["segments"].read_text(encoding="utf-8"))
+    assert manifest["study"] == "P1.2"
+    assert segments["study"] == "P1.2"
+
+
 def test_write_corpus_rejects_empty_reports(tmp_path: Path) -> None:
     """An empty ensemble is a caller error, not a silent empty corpus."""
     with pytest.raises(ValueError, match="at least one"):

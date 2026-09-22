@@ -14,8 +14,8 @@ import pytest
 import torch
 
 from cafl4ds.data.sources import SyntheticSource
-from cafl4ds.data.streams import EraStream
-from cafl4ds.eval import PerEraProbe, adaptation_report, backward_transfer, forgetting_measure
+from cafl4ds.data.streams import EraStream, EvalSet, EvalSets
+from cafl4ds.eval import PerEraProbe, adaptation_report, backward_transfer, few_shot_probe_curve, forgetting_measure
 from cafl4ds.filters.accept_all import AcceptAll
 from cafl4ds.loop import StreamingLoop
 from cafl4ds.models.vit import TinyViTEncoder
@@ -94,6 +94,25 @@ def test_adaptation_report_prefers_the_informative_encoder() -> None:
     report = adaptation_report(_flatten, _zeros_encode, stream.eval_sets, probe="knn", knn_k=5)
     assert report["adapted_acc"] > report["b5_acc"]
     assert report["gain"] == pytest.approx(report["adapted_acc"] - report["b5_acc"])
+
+
+def test_few_shot_probe_curve_uses_balanced_nested_support() -> None:
+    """Every point contains exactly the requested number of examples from each class."""
+    support = EvalSet(
+        images=torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.8, 0.2], [0.0, 1.0], [0.1, 0.9], [0.2, 0.8]]),
+        labels=torch.tensor([0, 0, 0, 1, 1, 1]),
+    )
+    query = EvalSet(images=torch.tensor([[0.95, 0.05], [0.05, 0.95]]), labels=torch.tensor([0, 1]))
+    curve = few_shot_probe_curve(_flatten, EvalSets(support, query), shots=[1, 2, 3], probe="knn", knn_k=1)
+    assert curve == {1: 1.0, 2: 1.0, 3: 1.0}
+
+
+def test_few_shot_probe_curve_rejects_unavailable_shots() -> None:
+    """A requested support size must exist for every class."""
+    support = EvalSet(images=torch.tensor([[0.0], [1.0]]), labels=torch.tensor([0, 1]))
+    query = EvalSet(images=torch.tensor([[0.0], [1.0]]), labels=torch.tensor([0, 1]))
+    with pytest.raises(ValueError, match="fewer than requested 2-shot"):
+        few_shot_probe_curve(_flatten, EvalSets(support, query), shots=[2])
 
 
 def test_loop_populates_probe_on_past(tmp_path: Path) -> None:
