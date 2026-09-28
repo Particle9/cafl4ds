@@ -48,7 +48,16 @@ class RunLogger:
         self._file.flush()
 
     def log_loss(
-        self, step: int, era: int, loss: float, grad_norm: float | None = None, finite: bool | None = None
+        self,
+        step: int,
+        era: int,
+        loss: float,
+        grad_norm: float | None = None,
+        finite: bool | None = None,
+        *,
+        lr: float | None = None,
+        trained: int | None = None,
+        optimizer_step: int | None = None,
     ) -> None:
         """Record one point of the SSL-loss series.
 
@@ -60,6 +69,9 @@ class RunLogger:
                 divergence instrument); omitted from the record when ``None``.
             finite: Optional flag — whether the step's loss and grad norm are both finite;
                 omitted when ``None``.
+            lr: Learning rate used for this optimizer update.
+            trained: Number of images actually passed to the method.
+            optimizer_step: One-based count of completed optimizer updates.
         """
         self._last_loss = loss
         record: dict[str, Any] = {"series": "loss", "step": step, "era": era, "loss": loss}
@@ -67,9 +79,15 @@ class RunLogger:
             record["grad_norm"] = grad_norm
         if finite is not None:
             record["finite"] = finite
+        if lr is not None:
+            record["lr"] = lr
+        if trained is not None:
+            record["trained"] = trained
+        if optimizer_step is not None:
+            record["optimizer_step"] = optimizer_step
         self._write(record)
 
-    def log_health(self, step: int, era: int, metrics: dict[str, float]) -> None:
+    def log_health(self, step: int, era: int, metrics: dict[str, Any]) -> None:
         """Record one point of the health series (with the most recent loss attached).
 
         Args:
@@ -84,6 +102,10 @@ class RunLogger:
             f"{k}={record[k]:.4f}" for k in _TABLE_COLUMNS if k in record and isinstance(record[k], int | float)
         )
         logger.info(f"[{self.run_name}] health {shown}")
+
+    def log_selection(self, step: int, era: int, raw_count: int, trace: dict[str, object]) -> None:
+        """Record the actual selection decision and realized training budget."""
+        self._write({"series": "selection", "step": step, "era": era, "raw_count": raw_count, **trace})
 
     def close(self) -> None:
         """Close the underlying file."""

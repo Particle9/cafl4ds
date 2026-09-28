@@ -1,0 +1,50 @@
+# P1.4.0. CPU-first, config-pinned experiment; override data_root on another host.
+defaults:
+  - encoder: tiny
+  - ssl: simsiam
+  - optim: adamw
+  - schedule: warmup_cosine
+  - _self_
+
+stage: smoke # smoke | bridge | susceptibility | selection | confirmation | arm
+profile: matched_384 # matched_384 | legacy_400 | smoke
+data_kind: stl10 # stl10 | synthetic
+data_root: /mnt/stl10
+output_root: outputs/p140
+protocol_path: null
+seed: 0
+ordering: iid # iid | b128 | b256 | full
+policy: accept_all # accept_all | random_half | loss_half | replay_fixed
+device: cpu
+img_size: 32
+batch_size: 128
+train_per_class: 384
+support_per_class: 40
+query_per_class: 50
+era_eval_per_class: 10
+epochs: 40
+seed_development: [0, 1, 2, 3, 4]
+seed_confirmation: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+quota_half: 64
+reservoir_capacity: 256
+eval_linear_epochs: [0, 5, 10, 20, 30, 36, 37, 38, 39, 40]
+quality_margin: 0.03
+geometry_ratio: 1.25
+bootstrap_draws: 10000
+num_threads: 4
+
+ssl:
+  pred_hidden: 128
+
+# The smoke profile uses network-free synthetic data and a short run.
+smoke:
+  classes: 4
+  per_class: 32
+  img_size: 16
+  batch_size: 8
+  train_per_class: 16
+  support_per_class: 3
+  query_per_class: 3
+  era_eval_per_class: 2
+  epochs: 2
+  quota_half: 4

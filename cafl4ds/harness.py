@@ -106,6 +106,10 @@ def run_stream_arm(
     grad_clip: float | None = 1.0,
     device: str = "cpu",
     era_evaluator: PerEraProbe | None = None,
+    measure_initial: bool = False,
+    epoch_end_only: bool = False,
+    probe_epochs: set[int] | None = None,
+    log_selection: bool = False,
 ) -> Arm:
     """Run one stepped arm as a :class:`~cafl4ds.loop.StreamingLoop` and read its log back.
 
@@ -128,6 +132,10 @@ def run_stream_arm(
         grad_clip: Global grad-norm clip, or ``None`` to disable.
         device: Torch device.
         era_evaluator: Optional probe-on-past evaluator (unused by the smoke arms).
+        measure_initial: Read a true pre-update health state.
+        epoch_end_only: Read health at complete epoch boundaries instead of step modulo.
+        probe_epochs: Optional epoch set forwarded to the loop's linear-probe switch.
+        log_selection: Persist per-arrival selector decisions and training budgets.
 
     Returns:
         The completed :class:`Arm`.
@@ -147,6 +155,10 @@ def run_stream_arm(
         grad_clip=grad_clip,
         device=device,
         era_evaluator=era_evaluator,
+        measure_initial=measure_initial,
+        epoch_end_only=epoch_end_only,
+        probe_epochs=probe_epochs,
+        log_selection=log_selection,
     )
     loop.run()
     return Arm(name=name, role=role, records=read_run(run_log_path))

@@ -92,6 +92,47 @@ class EvalSets:
         )
 
 
+@dataclass(frozen=True)
+class SplitIndices:
+    """Fixed source-row IDs for each class, independent of arrival order."""
+
+    support: dict[int, tuple[int, ...]]
+    query: dict[int, tuple[int, ...]]
+    era_eval: dict[int, tuple[int, ...]]
+    train: dict[int, tuple[int, ...]]
+
+    @classmethod
+    def create(
+        cls,
+        labels: torch.Tensor,
+        *,
+        seed: int,
+        support_per_class: int,
+        query_per_class: int,
+        era_eval_per_class: int,
+        max_train_per_class: int | None,
+    ) -> SplitIndices:
+        """Reserve disjoint examples once; later orderings reuse the same IDs."""
+        gen = torch.Generator().manual_seed(seed)
+        support: dict[int, tuple[int, ...]] = {}
+        query: dict[int, tuple[int, ...]] = {}
+        era_eval: dict[int, tuple[int, ...]] = {}
+        train: dict[int, tuple[int, ...]] = {}
+        for cls_id in sorted(set(labels.tolist())):
+            rows = (labels == cls_id).nonzero(as_tuple=True)[0]
+            perm = rows[torch.randperm(rows.numel(), generator=gen)].tolist()
+            s, q, e = support_per_class, query_per_class, era_eval_per_class
+            need = s + q + e
+            if len(perm) <= need:
+                raise ValueError(f"class {cls_id} has {len(perm)} images but {need} are reserved for eval")
+            support[cls_id] = tuple(perm[:s])
+            query[cls_id] = tuple(perm[s : s + q])
+            era_eval[cls_id] = tuple(perm[s + q : need])
+            remaining = perm[need:]
+            train[cls_id] = tuple(remaining[:max_train_per_class])
+        return cls(support=support, query=query, era_eval=era_eval, train=train)
+
+
 class EraStream:
     """A single-pass stream that orders a data source into eras.
 
@@ -113,6 +154,7 @@ class EraStream:
         max_train_per_class: int | None = None,
         drop_last: bool = False,
         seed: int = 0,
+        split_indices: SplitIndices | None = None,
     ) -> None:
         """Build the stream (loads the source and constructs the splits eagerly).
 
@@ -139,6 +181,8 @@ class EraStream:
                 held-out reservations (keeps smoke runs short).
             drop_last: Whether to drop a final short batch.
             seed: RNG seed for the held-out sampling and IID shuffle.
+            split_indices: Optional precomputed immutable partitions; avoids consuming split RNG
+                when class order changes.
 
         Raises:
             ValueError: If ``order`` is unknown, ``block_size`` is misused (non-positive, or set
@@ -163,25 +207,35 @@ class EraStream:
         classes = sorted(set(labels.tolist()))
         self._class_order = class_order if class_order is not None else classes
 
+        if split_indices is not None:
+            self._validate_split_indices(split_indices, labels, classes)
+
         train_indices_by_era: list[tuple[int, torch.Tensor]] = []
         support_idx, query_idx = [], []
         per_era_eval: dict[int, EvalSet] = {}
         for era, cls in enumerate(self._class_order):
-            cls_idx = (labels == cls).nonzero(as_tuple=True)[0]
-            perm = cls_idx[torch.randperm(cls_idx.numel(), generator=self._generator)]
-            need = support_per_class + query_per_class + era_eval_per_class
-            if perm.numel() <= need:
-                raise ValueError(
-                    f"class {cls} has {perm.numel()} images but {need} are reserved for eval; "
-                    "reduce the per-class reservations or use more data."
-                )
-            s, q, e = support_per_class, query_per_class, era_eval_per_class
-            support_idx.append(perm[:s])
-            query_idx.append(perm[s : s + q])
-            era_eval = perm[s + q : s + q + e]
-            train = perm[s + q + e :]
-            if max_train_per_class is not None:
-                train = train[:max_train_per_class]
+            if split_indices is None:
+                cls_idx = (labels == cls).nonzero(as_tuple=True)[0]
+                perm = cls_idx[torch.randperm(cls_idx.numel(), generator=self._generator)]
+                need = support_per_class + query_per_class + era_eval_per_class
+                if perm.numel() <= need:
+                    raise ValueError(
+                        f"class {cls} has {perm.numel()} images but {need} are reserved for eval; "
+                        "reduce the per-class reservations or use more data."
+                    )
+                s, q, e = support_per_class, query_per_class, era_eval_per_class
+                support, query = perm[:s], perm[s : s + q]
+                era_eval = perm[s + q : s + q + e]
+                train = perm[s + q + e :]
+                if max_train_per_class is not None:
+                    train = train[:max_train_per_class]
+            else:
+                support = torch.tensor(split_indices.support[cls], dtype=torch.long)
+                query = torch.tensor(split_indices.query[cls], dtype=torch.long)
+                era_eval = torch.tensor(split_indices.era_eval[cls], dtype=torch.long)
+                train = torch.tensor(split_indices.train[cls], dtype=torch.long)
+            support_idx.append(support)
+            query_idx.append(query)
             per_era_eval[era] = EvalSet(images[era_eval], labels[era_eval])
             train_indices_by_era.append((era, train))
 
@@ -191,6 +245,26 @@ class EraStream:
             per_era=per_era_eval,
         )
         self._order_stream = self._build_order(train_indices_by_era)
+
+    @staticmethod
+    def _validate_split_indices(splits: SplitIndices, labels: torch.Tensor, classes: list[int]) -> None:
+        """Fail closed on malformed, overlapping, or wrongly labelled split manifests."""
+        source_classes = set(labels.tolist())
+        for part in (splits.support, splits.query, splits.era_eval, splits.train):
+            if set(part) != source_classes:
+                raise ValueError("split manifest must include every source class")
+        if len(set(classes)) != len(classes) or not set(classes) <= source_classes:
+            raise ValueError("class_order must contain unique source classes")
+        used: set[int] = set()
+        for cls_id in source_classes:
+            for part in (splits.support, splits.query, splits.era_eval, splits.train):
+                ids = part[cls_id]
+                if not ids:
+                    raise ValueError(f"class {cls_id} has an empty split")
+                for row_id in ids:
+                    if row_id < 0 or row_id >= len(labels) or int(labels[row_id]) != cls_id or row_id in used:
+                        raise ValueError(f"invalid or overlapping split row {row_id} for class {cls_id}")
+                    used.add(row_id)
 
     def _make_eval(self, idx: torch.Tensor, labels: torch.Tensor) -> EvalSet:
         """Materialize an :class:`EvalSet` from an index tensor.
@@ -261,6 +335,35 @@ class EraStream:
     def num_eras(self) -> int:
         """Number of eras in the stream (class blocks, or 1 for IID)."""
         return 1 if self.order == "iid" else len(self._class_order)
+
+    @property
+    def ordered_ids(self) -> tuple[int, ...]:
+        """Source-row IDs in arrival order, for offline provenance only."""
+        return tuple(row_id for _, row_id in self._order_stream)
+
+    @property
+    def class_order(self) -> tuple[int, ...]:
+        """Semantic class order used to create the eras."""
+        return tuple(self._class_order)
+
+    @property
+    def batch_ids(self) -> tuple[tuple[int, ...], ...]:
+        """Source-row IDs grouped exactly as the iterator groups incoming batches."""
+        batches: list[tuple[int, ...]] = []
+        buffer: list[int] = []
+        prev_era: int | None = None
+        for era, row_id in self._order_stream:
+            if prev_era is not None and era != prev_era and buffer:
+                batches.append(tuple(buffer))
+                buffer = []
+            prev_era = era
+            buffer.append(row_id)
+            if len(buffer) == self.batch_size:
+                batches.append(tuple(buffer))
+                buffer = []
+        if buffer and not self.drop_last:
+            batches.append(tuple(buffer))
+        return tuple(batches)
 
     def __len__(self) -> int:
         """Number of batches the stream will deliver.

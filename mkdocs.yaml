@@ -65,6 +65,7 @@ nav:
       - P1.0.0: experiments/latest-results/P1.0.0.md
       - P1.0.1: experiments/latest-results/P1.0.1.md
       - P1.0.2: experiments/latest-results/P1.0.2.md
+      - P1.4.0: experiments/latest-results/P1.4.0.md
 
   - Phase 0:
       - experiments/phase0/index.md
@@ -98,6 +99,7 @@ nav:
       - P1.0.0 Open loop instrumentation (P0 integration): experiments/phase1/P1.0.0.md
       - P1.0.1 Open loop instrumentation (same-seed vs. shared-iterator): experiments/phase1/P1.0.1.md
       - P1.0.2 Open loop instrumentation (deployment prototype de-risker): experiments/phase1/P1.0.2.md
+      - P1.4.0 Intact SimSiam under correlated training: experiments/phase1/P1.4.0.md
 
   - Audits:
       - P0.2 (collapse mode): experiments/audits/P0.2.md

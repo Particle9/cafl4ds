@@ -1,0 +1,92 @@
+{
+  "stress": "b128",
+  "quality_margin": 0.03,
+  "geometry_ratio": 1.25,
+  "seed_confirmation": [
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109
+  ],
+  "policy": [
+    "accept_all",
+    "random_half",
+    "loss_half",
+    "replay_fixed"
+  ],
+  "scoring": "eval-mode-isolated-cpu",
+  "quota_half": 64,
+  "reservoir_capacity": 256,
+  "analysis": "paired-bootstrap-10000-and-exact-sign-flip-holm",
+  "output_root": "/Users/williammin/cafl4ds/outputs/p140",
+  "values": {
+    "img_size": 32,
+    "batch_size": 128,
+    "train_per_class": 384,
+    "support_per_class": 40,
+    "query_per_class": 50,
+    "era_eval_per_class": 10,
+    "epochs": 40,
+    "quota_half": 64
+  },
+  "source": {
+    "kind": "stl10_train",
+    "files": {
+      "train_X.bin": {
+        "size": 138240000,
+        "sha256": "fd6ff6b82df7f3bdb4c3a506888012a65a9a1e7fdf5efc0078570737bfa39d82"
+      },
+      "train_y.bin": {
+        "size": 5000,
+        "sha256": "0cd44363fdaae70fdc79bc8a500aef0436bf2476db3292726814afed629d40dc"
+      }
+    }
+  },
+  "encoder": {
+    "_target_": "cafl4ds.models.vit.TinyViTEncoder",
+    "img_size": 32,
+    "patch_size": 8,
+    "in_chans": 3,
+    "embed_dim": 96,
+    "depth": 4,
+    "num_heads": 3,
+    "mlp_ratio": 2.0
+  },
+  "ssl": {
+    "_target_": "cafl4ds.ssl.factory.build_simsiam",
+    "proj_hidden": 256,
+    "proj_dim": 128,
+    "pred_hidden": 128,
+    "anti_collapse": true
+  },
+  "optim": {
+    "_target_": "torch.optim.AdamW",
+    "lr": 0.001,
+    "weight_decay": 0.05
+  },
+  "schedule": {
+    "_target_": "cafl4ds.schedule.warmup_cosine_schedule",
+    "warmup_frac": 0.1,
+    "min_lr_frac": 0.0
+  },
+  "eval_linear_epochs": [
+    0,
+    5,
+    10,
+    20,
+    30,
+    36,
+    37,
+    38,
+    39,
+    40
+  ],
+  "bootstrap_draws": 10000,
+  "hash": "7bc3abd7079c1aacc52d00b47afec23ac9106a03de2959d552894887c6f025ed"
+}

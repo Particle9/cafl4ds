@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sized
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 from loguru import logger
@@ -68,6 +68,10 @@ class StreamingLoop:
         grad_clip: float | None = 1.0,
         device: str = "cpu",
         era_evaluator: PerEraProbe | None = None,
+        measure_initial: bool = False,
+        epoch_end_only: bool = False,
+        probe_epochs: set[int] | None = None,
+        log_selection: bool = False,
     ) -> None:
         """Build the loop.
 
@@ -90,6 +94,10 @@ class StreamingLoop:
                 the current encoder is probed over all seen eras at each era boundary and at the
                 end, building the accuracy matrix behind Backward Transfer / Forgetting. ``None``
                 (default) runs no downstream probing — the loop is unchanged.
+            measure_initial: Read health before the first optimizer update.
+            epoch_end_only: Read health only after each completed epoch.
+            probe_epochs: Optional epochs on which to run the monitor's standard linear probe.
+            log_selection: Write selector decisions and realized budgets for each arrival.
         """
         self.stream = stream
         self.method = method
@@ -103,8 +111,14 @@ class StreamingLoop:
         self.grad_clip = grad_clip
         self.device = torch.device(device)
         self.era_evaluator = era_evaluator
+        self.measure_initial = measure_initial
+        self.epoch_end_only = epoch_end_only
+        self.probe_epochs = probe_epochs
+        self.log_selection = log_selection
+        self._completed_updates = 0
+        self._raw_seen = 0
 
-    def run(self) -> RunLogger:
+    def run(self) -> RunLogger:  # noqa: C901 - shared single-pass and study loop
         """Run the stream (``epochs`` passes), logging loss and health over global steps.
 
         Returns:
@@ -117,6 +131,8 @@ class StreamingLoop:
         if self.epochs > 1 and not isinstance(self.stream, Sized):
             raise TypeError("multi-epoch loop (epochs > 1) requires a stream with a known length.")
         batches_per_epoch = len(self.stream) if isinstance(self.stream, Sized) else 0
+        if self.measure_initial:
+            self._study_health(step=-1, era=-1, epoch=0, phase="initial")
         last_step, last_era = -1, 0
         prev_era: int | None = None
         diverged = False
@@ -130,13 +146,16 @@ class StreamingLoop:
                 if stats is None:  # sub-minimum batch after selection — skipped
                     continue
                 last_step = step
+                self._completed_updates += 1
                 if not stats.finite:  # divergence (P0.4.0): stop on the first non-finite step
                     diverged = True
                     break
-                if step % self.eval_every == 0:
+                if not self.epoch_end_only and step % self.eval_every == 0:
                     self.run_logger.log_health(step, batch.era, self.monitor.measure(self.method, step))
             if diverged:
                 break
+            if self.epoch_end_only and last_step >= 0:
+                self._study_health(step=last_step, era=last_era, epoch=epoch + 1, phase="epoch_end")
         self._finalize(diverged=diverged, last_step=last_step, last_era=last_era)
         logger.info("streaming loop complete\n" + self.run_logger.tabulate())
         self.run_logger.close()
@@ -155,11 +174,35 @@ class StreamingLoop:
         """
         moved = StreamBatch(images=batch.images.to(self.device), era=batch.era, step=step)
         accepted = self.selection_filter.select(moved, FilterContext(method=self.method, step=step))
+        self._raw_seen += int(batch.images.shape[0])
+        if self.log_selection:
+            trace = getattr(self.selection_filter, "last_trace", {})
+            self.run_logger.log_selection(
+                step,
+                batch.era,
+                int(batch.images.shape[0]),
+                {
+                    **trace,
+                    "raw_seen": self._raw_seen,
+                    "optimizer_step_before": self._completed_updates,
+                    "skipped": accepted.shape[0] < _MIN_BATCH,
+                },
+            )
         if accepted.shape[0] < _MIN_BATCH:
             logger.debug(f"step {step}: skipping batch of {accepted.shape[0]} (< {_MIN_BATCH}).")
             return None
+        lr = float(self.optimizer.param_groups[0]["lr"])
         stats = self._update(accepted)
-        self.run_logger.log_loss(step, batch.era, stats.loss, grad_norm=stats.grad_norm, finite=stats.finite)
+        self.run_logger.log_loss(
+            step,
+            batch.era,
+            stats.loss,
+            grad_norm=stats.grad_norm,
+            finite=stats.finite,
+            lr=lr if self.log_selection else None,
+            trained=int(accepted.shape[0]) if self.log_selection else None,
+            optimizer_step=self._completed_updates + 1 if self.log_selection else None,
+        )
         if not stats.finite:
             # The loss or the gradient went non-finite. The per-step trace up to here is the
             # divergence fingerprint — the caller stops rather than keep stepping on NaN params.
@@ -182,9 +225,28 @@ class StreamingLoop:
         """
         if diverged or last_step < 0:
             return
-        if last_step % self.eval_every != 0:  # always end on a health reading
+        if not self.epoch_end_only and last_step % self.eval_every != 0:  # always end on a health reading
             self.run_logger.log_health(last_step, last_era, self.monitor.measure(self.method, last_step))
-        self._probe_past(last_era)  # final row: current encoder over every era seen
+        if not self.epoch_end_only:
+            self._probe_past(last_era)  # recurring eras do not define the study's checkpointed probe
+
+    def _study_health(self, *, step: int, era: int, epoch: int, phase: str) -> None:
+        """Log an initial or epoch-end measurement with an unambiguous update clock."""
+        run_linear = self.monitor.run_linear
+        if self.probe_epochs is not None:
+            self.monitor.run_linear = epoch in self.probe_epochs
+        try:
+            metrics = self.monitor.measure(self.method, step)
+        finally:
+            self.monitor.run_linear = run_linear
+        study_metrics: dict[str, Any] = {
+            **metrics,
+            "optimizer_step": self._completed_updates,
+            "raw_seen": self._raw_seen,
+            "epoch": epoch,
+            "phase": phase,
+        }
+        self.run_logger.log_health(step, era, study_metrics)
 
     def _probe_past(self, era: int) -> None:
         """Record one probe-on-past row for the just-finished ``era`` (if an evaluator is set).
@@ -220,7 +282,7 @@ class StreamingLoop:
         self.method.train()
         self.optimizer.zero_grad()
         loss = self.method.training_step(images)
-        loss.backward()
+        loss.backward()  # type: ignore[no-untyped-call]
         grad_norm = self._grad_norm()
         if self.grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(self.method.parameters(), self.grad_clip)

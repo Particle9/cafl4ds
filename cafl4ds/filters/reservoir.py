@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import torch
 
-from cafl4ds.filters.base import FilterContext, ReplayBuffer
+from cafl4ds.data.streams import StreamBatch
+from cafl4ds.filters.base import Filter, FilterContext, ReplayBuffer
 
 
 class ReservoirReplay(ReplayBuffer):
@@ -96,3 +97,64 @@ class ReservoirReplay(ReplayBuffer):
             if j < self.capacity:
                 self._buffer[j] = item
         self._seen += 1
+
+
+class FixedBudgetReservoir(Filter):
+    """Replace some current examples with past arrivals at fixed update size."""
+
+    def __init__(
+        self,
+        *,
+        incoming_count: int = 128,
+        replay_count: int = 64,
+        capacity: int = 256,
+        seed: int = 0,
+        arrival_batches: tuple[tuple[int, ...], ...],
+    ) -> None:
+        """Configure a uniform arrival-event reservoir with a fixed training budget."""
+        if incoming_count < 2 or replay_count < 1 or replay_count >= incoming_count or capacity < replay_count:
+            raise ValueError("invalid fixed-budget reservoir dimensions")
+        self.incoming_count = incoming_count
+        self.replay_count = replay_count
+        self.capacity = capacity
+        self.arrival_batches = arrival_batches
+        self._buffer: list[tuple[torch.Tensor, int, int]] = []
+        self._seen = 0
+        self._gen = torch.Generator().manual_seed(seed)
+        self.last_trace: dict[str, object] = {}
+
+    def select(self, batch: StreamBatch, ctx: FilterContext) -> torch.Tensor:
+        """Sample only past events, then ingest every current arrival."""
+        import time  # noqa: PLC0415 - selection timing kept local to this adapter
+
+        if batch.images.shape[0] != self.incoming_count:
+            raise ValueError("fixed-budget replay requires the registered incoming batch size")
+        start = time.perf_counter()
+        ids = self.arrival_batches[ctx.step % len(self.arrival_batches)]
+        if len(ids) != self.incoming_count:
+            raise ValueError("arrival ID manifest disagrees with incoming batch")
+        r = min(self.replay_count, len(self._buffer))
+        replay_rows = torch.randperm(len(self._buffer), generator=self._gen)[:r].tolist()
+        current_rows = torch.randperm(self.incoming_count, generator=self._gen)[: self.incoming_count - r]
+        current_rows = current_rows.sort().values
+        replay = [self._buffer[i] for i in replay_rows]
+        selected = batch.images[current_rows.to(batch.images.device)]
+        if replay:
+            selected = torch.cat((selected, torch.stack([entry[0] for entry in replay]).to(batch.images.device)))
+        # Draw from previous history first; every raw arrival is then eligible for storage.
+        for row, source_id in enumerate(ids):
+            item = (batch.images[row].detach().cpu().clone(), ctx.step, source_id)
+            if len(self._buffer) < self.capacity:
+                self._buffer.append(item)
+            else:
+                replacement = int(torch.randint(0, self._seen + 1, (1,), generator=self._gen))
+                if replacement < self.capacity:
+                    self._buffer[replacement] = item
+            self._seen += 1
+        self.last_trace = {
+            "current_rows": current_rows.tolist(),
+            "replay_events": [[step, source_id] for _, step, source_id in replay],
+            "trained": self.incoming_count,
+            "selection_seconds": time.perf_counter() - start,
+        }
+        return selected
