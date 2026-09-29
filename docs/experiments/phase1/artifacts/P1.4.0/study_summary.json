@@ -1,6 +1,6 @@
 {
   "analysis_provenance": {
-    "script_sha256": "9553b610dec94ee967bb80657d1b3f7fdd5c490f66e360e11a6a638ab459677c",
+    "script_sha256": "66c85953a3ecb809cf89cac080a27f7498a5bce5ad1713389154ef2bfdf0492c",
     "matplotlib": "3.11.2"
   },
   "apparatus_valid": true,

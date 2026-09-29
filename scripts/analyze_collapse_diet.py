@@ -148,6 +148,79 @@ def _save_trajectories(rows: list[dict[str, Any]], out_dir: Path) -> None:
     plt.close(fig)
 
 
+def _save_stage_trajectories(
+    rows: list[dict[str, Any]],
+    out_dir: Path,
+    *,
+    seeds: list[int],
+    ordering: str | None,
+    conditions: tuple[str, ...],
+    group_key: str,
+    labels: dict[str, str],
+    title: str,
+    filename: str,
+    y_limits: tuple[tuple[float, float], tuple[float, float]] | None = None,
+) -> None:
+    """Plot every specified seed separately, with a bold mean for each diet or policy."""
+    colors = ("#0072B2", "#D55E00", "#009E73", "#CC79A7")
+    selected = [
+        row
+        for row in rows
+        if row["profile"] == "matched_384"
+        and not row["pc"]
+        and row["seed"] in seeds
+        and (ordering is None or row["ordering"] == ordering)
+        and row[group_key] in conditions
+        and (group_key != "ordering" or row["policy"] == "accept_all")
+    ]
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7.5), sharex=True, constrained_layout=True)
+    for condition, color in zip(conditions, colors, strict=True):
+        trajectories = []
+        for seed in seeds:
+            points = sorted(
+                (row for row in selected if row[group_key] == condition and row["seed"] == seed),
+                key=lambda row: row["optimizer_step"],
+            )
+            if len(points) != 41:
+                raise ValueError(f"{filename}: expected 41 checkpoints for {condition} seed {seed}; got {len(points)}")
+            trajectories.extend(points)
+            for ax, key, multiplier in zip(axes, ("rankme_proj", "linear_acc"), (1, 100), strict=True):
+                available = [row for row in points if row[key] is not None]
+                ax.plot(
+                    [row["optimizer_step"] for row in available],
+                    [row[key] * multiplier for row in available],
+                    color=color,
+                    linewidth=0.9,
+                    alpha=0.22,
+                    marker="o" if key == "linear_acc" else None,
+                    markersize=2,
+                )
+        for ax, key, multiplier in zip(axes, ("rankme_proj", "linear_acc"), (1, 100), strict=True):
+            steps = sorted({row["optimizer_step"] for row in trajectories if row[key] is not None})
+            means = [
+                float(
+                    np.mean(
+                        [row[key] for row in trajectories if row["optimizer_step"] == step and row[key] is not None]
+                    )
+                ) * multiplier
+                for step in steps
+            ]
+            ax.plot(steps, means, color=color, linewidth=2.7, label=labels[condition])
+    axes[0].set_ylabel("Projector RankMe")
+    axes[1].set_ylabel("Ten-way linear accuracy (%)")
+    axes[1].set_xlabel("Optimizer updates")
+    axes[1].set_xlim(0, 1200)
+    axes[0].legend(ncol=2, loc="best")
+    if y_limits is not None:
+        for ax, limits in zip(axes, y_limits, strict=True):
+            ax.set_ylim(*limits)
+    for ax in axes:
+        ax.grid(alpha=0.15)
+    fig.suptitle(f"{title}\nThin lines: individual seeds; bold lines: seed means")
+    fig.savefig(out_dir / filename, dpi=180)
+    plt.close(fig)
+
+
 def _save_effects(summary: dict[str, Any], out_dir: Path, *, filename: str) -> None:
     """Plot paired seed effects and bootstrap intervals without pooling checkpoints."""
     if "cells" in summary:
@@ -214,7 +287,7 @@ def _save_budgets(rows: list[dict[str, Any]], out_dir: Path) -> None:
 
 
 def analyze(root: Path, out_dir: Path) -> dict[str, Any]:
-    """Build a compact manifest, outcome record, figure data, and four report plots."""
+    """Build a compact manifest, outcome record, figure data, and study plots."""
     out_dir.mkdir(parents=True, exist_ok=True)
     arms = _arms(root)
     trajectories = _trajectories(arms)
@@ -273,8 +346,63 @@ def analyze(root: Path, out_dir: Path) -> dict[str, Any]:
     _save_budgets(budgets, out_dir)
     if development:
         _save_effects(development, out_dir, filename="dose_effects.png")
+        _save_stage_trajectories(
+            trajectories,
+            out_dir,
+            seeds=[int(row["seed"]) for row in development["reference"]["rows"]],
+            ordering=None,
+            conditions=("iid", "b128", "b256", "full"),
+            group_key="ordering",
+            labels={"iid": "IID", "b128": "128-image blocks", "b256": "256-image blocks", "full": "384-image blocks"},
+            title="Stage C: diet trajectories (development seeds 0–4)",
+            filename="stage_c_diet_trajectories.png",
+        )
     if confirmed or "selection" in stages:
         _save_effects(confirmed or stages["selection"], out_dir, filename="policy_effects.png")
+    if confirmed and protocol:
+        seeds = [int(seed) for seed in protocol["seed_confirmation"]]
+        policies = ("accept_all", "random_half", "loss_half", "replay_fixed")
+        stress = str(protocol["stress"])
+        e_rows = [
+            row
+            for row in trajectories
+            if row["profile"] == "matched_384"
+            and row["seed"] in seeds
+            and row["ordering"] in (stress, "iid")
+            and row["policy"] in policies
+            and not row["pc"]
+        ]
+
+        def shared_limit(key: str, multiplier: float) -> tuple[float, float]:
+            values = [float(row[key]) * multiplier for row in e_rows if row[key] is not None]
+            if not values:
+                raise ValueError(f"Stage E has no {key} trajectory values")
+            pad = (max(values) - min(values)) * 0.04
+            return min(values) - pad, max(values) + pad
+
+        y_limits = (shared_limit("rankme_proj", 1), shared_limit("linear_acc", 100))
+        labels = {
+            "accept_all": "Accept all",
+            "random_half": "Random half",
+            "loss_half": "Loss half",
+            "replay_fixed": "Fixed-budget replay",
+        }
+        for ordering, title, filename in (
+            (stress, "Stage E: policies on 128-image class blocks", "stage_e_stress_policy_trajectories.png"),
+            ("iid", "Stage E: policies on IID", "stage_e_iid_policy_trajectories.png"),
+        ):
+            _save_stage_trajectories(
+                trajectories,
+                out_dir,
+                seeds=seeds,
+                ordering=str(ordering),
+                conditions=policies,
+                group_key="policy",
+                labels=labels,
+                title=title,
+                filename=filename,
+                y_limits=y_limits,
+            )
     return summary
 
 
