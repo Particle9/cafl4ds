@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn.functional as F  # noqa: N812 - conventional alias
@@ -173,8 +175,9 @@ class BDD100KSource(AttributeSource):
     Images with an undefined attribute on either axis are skipped. Native BDD frames are 1280x720, so
     they are resized to ``img_size`` (also the low-memory portability lever). Video is *not* used.
 
-    Expected layout under ``bdd_root`` (the canonical BDD100K distribution):
-    ``images/100k/<split>/*.jpg`` and ``labels/bdd100k_labels_images_<split>.json`` — both overridable.
+    Images live under ``images/100k/<split>/*.jpg``. With ``legacy_labels=True`` (the default),
+    labels come from ``labels/bdd100k_labels_images_<split>.json``. With ``legacy_labels=False``,
+    labels come from per-image JSON files in ``labels/100k/<split>/`` — both paths are overridable.
     """
 
     def __init__(
@@ -186,6 +189,8 @@ class BDD100KSource(AttributeSource):
         images_dir: str | None = None,
         labels_file: str | None = None,
         min_canary_count: int = 0,
+        *,
+        legacy_labels: bool = True,
     ) -> None:
         """Configure the BDD100K source.
 
@@ -195,12 +200,15 @@ class BDD100KSource(AttributeSource):
             img_size: Side length to resize the native 1280x720 frames to.
             max_images: If set, keep at most this many (attribute-valid) images.
             images_dir: Override for the image directory (default ``<root>/images/100k/<split>``).
-            labels_file: Override for the attributes JSON (default
-                ``<root>/labels/bdd100k_labels_images_<split>.json``).
+            labels_file: Override for the attributes JSON file in legacy mode (default
+                ``<root>/labels/bdd100k_labels_images_<split>.json``), or the per-image JSON
+                directory when ``legacy_labels=False`` (default ``<root>/labels/100k/<split>``).
             min_canary_count: Drop images whose **scene** (canary class) has fewer than this many
                 attribute-valid images. Real BDD has a long scene tail (e.g. ``tunnel`` ≈ a handful of
                 frames) that cannot support a balanced held-out probe; this keeps the canary to
                 probeable classes. ``0`` (default) keeps every observed scene — no change.
+            legacy_labels: Read the combined legacy JSON array when true. When false, read
+                per-image records with top-level attributes and detections in ``frames[0].objects``.
         """
         self.bdd_root = bdd_root
         self.split = split
@@ -209,6 +217,7 @@ class BDD100KSource(AttributeSource):
         self._images_dir = images_dir
         self._labels_file = labels_file
         self.min_canary_count = min_canary_count
+        self.legacy_labels = legacy_labels
         self._num_canary = 0  # set on load (number of observed scenes)
         self._cache: AttributedImages | None = None
 
@@ -218,16 +227,45 @@ class BDD100KSource(AttributeSource):
         return self._num_canary
 
     def _paths(self) -> tuple[Path, Path]:
-        """Resolve the image directory and attributes JSON, honouring the overrides."""
+        """Resolve the image directory and labels file or directory, honouring the overrides."""
         images_dir = (
             Path(self._images_dir) if self._images_dir else Path(self.bdd_root) / "images" / "100k" / self.split
         )
         labels_file = (
             Path(self._labels_file)
             if self._labels_file
-            else Path(self.bdd_root) / "labels" / f"bdd100k_labels_images_{self.split}.json"
+            else (
+                Path(self.bdd_root) / "labels" / f"bdd100k_labels_images_{self.split}.json"
+                if self.legacy_labels
+                else Path(self.bdd_root) / "labels" / "100k" / self.split
+            )
         )
         return images_dir, labels_file
+
+    def _records(self, labels_path: Path) -> Iterator[dict[str, Any]]:
+        """Yield legacy-shaped records; per-image files are read lazily in filename order."""
+        if self.legacy_labels:
+            if not labels_path.is_file():
+                raise FileNotFoundError(
+                    f"BDD100K attributes JSON not found at {labels_path}. Download the labels and place them "
+                    "under <bdd_root>/labels/ (or pass labels_file=)."
+                )
+            yield from json.loads(labels_path.read_text(encoding="utf-8"))
+            return
+        if not labels_path.is_dir():
+            raise FileNotFoundError(
+                f"BDD100K per-image labels not found at {labels_path}. Place the JSON files under "
+                "<bdd_root>/labels/100k/<split>/ (or pass labels_file= with a directory)."
+            )
+        for label_file in sorted(labels_path.glob("*.json")):
+            record = json.loads(label_file.read_text(encoding="utf-8"))
+            name = record["name"]
+            frames = record.get("frames", [])
+            yield {
+                "name": name if name.endswith(".jpg") else f"{name}.jpg",
+                "attributes": record.get("attributes", {}),
+                "labels": frames[0].get("objects", []) if frames else [],
+            }
 
     def load(self) -> AttributedImages:
         """Parse the attribute records, decode the referenced images, and build both axes.
@@ -239,7 +277,7 @@ class BDD100KSource(AttributeSource):
         (optional) gate arms then decodes the corpus **once** rather than 2–3× per drive.
 
         Raises:
-            FileNotFoundError: If the image directory or the attributes JSON is missing.
+            FileNotFoundError: If the image directory or the labels file/directory is missing.
             ValueError: If no image survives attribute filtering.
         """
         if self._cache is None:
@@ -254,15 +292,9 @@ class BDD100KSource(AttributeSource):
                 f"BDD100K images not found at {images_dir}. Download the 100k images and arrange them "
                 "under <bdd_root>/images/100k/<split>/ (see docs/experiments/phase1/P1.0.2.md)."
             )
-        if not labels_file.is_file():
-            raise FileNotFoundError(
-                f"BDD100K attributes JSON not found at {labels_file}. Download the labels and place them "
-                "under <bdd_root>/labels/ (or pass labels_file=)."
-            )
-        records = json.loads(labels_file.read_text(encoding="utf-8"))
         # Collect (path, regime-tuple, scene, category-counts) for every attribute-valid, present image.
         valid: list[tuple[Path, tuple[str, str], str, dict[str, int]]] = []
-        for rec in records:
+        for rec in self._records(labels_file):
             attrs = rec.get("attributes", {})
             timeofday, weather, scene = attrs.get("timeofday"), attrs.get("weather"), attrs.get("scene")
             if timeofday in _UNKNOWN_ATTRS or weather in _UNKNOWN_ATTRS or scene in _UNKNOWN_ATTRS:
