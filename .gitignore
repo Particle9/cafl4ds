@@ -100,6 +100,8 @@ multirun/
 .env
 .env.*
 local_settings.py
+# Personal Hydra dataset profiles inherit the tracked shared configs.
+cafl4ds/configs/data/*_local.yaml
 combined_certificates.pem
 .prompts
 .scratchpad
