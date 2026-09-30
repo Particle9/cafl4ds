@@ -93,8 +93,10 @@ def test_resize_images_is_a_noop_when_already_sized() -> None:
     assert resize_images(imgs, 8).shape == (2, 3, 8, 8)
 
 
-def _write_bdd_fixture(root: Path, records: list[dict[str, object]], split: str = "train") -> None:
-    """Write a tiny canonical-layout BDD100K fixture (images + attributes JSON) under ``root``."""
+def _write_bdd_fixture(
+    root: Path, records: list[dict[str, object]], split: str = "train", *, legacy_labels: bool = True
+) -> None:
+    """Write tiny BDD100K images and either combined or per-image labels under ``root``."""
     images_dir = root / "images" / "100k" / split
     images_dir.mkdir(parents=True)
     (root / "labels").mkdir(parents=True)
@@ -108,7 +110,19 @@ def _write_bdd_fixture(root: Path, records: list[dict[str, object]], split: str 
         {"name": r["name"], "attributes": r["attributes"], **({"labels": r["labels"]} if "labels" in r else {})}
         for r in records
     ]
-    (root / "labels" / f"bdd100k_labels_images_{split}.json").write_text(json.dumps(labels), encoding="utf-8")
+    if legacy_labels:
+        (root / "labels" / f"bdd100k_labels_images_{split}.json").write_text(json.dumps(labels), encoding="utf-8")
+    else:
+        labels_dir = root / "labels" / "100k" / split
+        labels_dir.mkdir(parents=True)
+        for record in labels:
+            name = Path(str(record["name"])).stem
+            per_image = {
+                "name": name,
+                "attributes": record["attributes"],
+                "frames": [{"timestamp": 10000, "objects": record.get("labels", [])}],
+            }
+            (labels_dir / f"{name}.json").write_text(json.dumps(per_image), encoding="utf-8")
 
 
 def test_synthetic_source_caches_the_decode() -> None:
@@ -118,14 +132,15 @@ def test_synthetic_source_caches_the_decode() -> None:
     assert src.load() is first
 
 
-def test_bdd_source_caches_the_decode(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_labels", [True, False])
+def test_bdd_source_caches_the_decode(tmp_path: Path, legacy_labels: bool) -> None:
     """The BDD source decodes once and reuses the cache — so threading it through arms is cheap (A2)."""
     records: list[dict[str, object]] = [
         {"name": "a.jpg", "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"}},
         {"name": "b.jpg", "attributes": {"timeofday": "night", "weather": "rainy", "scene": "city street"}},
     ]
-    _write_bdd_fixture(tmp_path, records)
-    src = BDD100KSource(str(tmp_path), img_size=16)
+    _write_bdd_fixture(tmp_path, records, legacy_labels=legacy_labels)
+    src = BDD100KSource(str(tmp_path), img_size=16, legacy_labels=legacy_labels)
     first = src.load()
     assert src.load() is first
 
@@ -166,7 +181,8 @@ def test_bdd_source_counts_detection_categories_per_image(tmp_path: Path) -> Non
     assert a.object_categories == [{"car": 2, "person": 1}, {}]
 
 
-def test_bdd_source_skips_undefined_attributes_and_missing_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_labels", [True, False])
+def test_bdd_source_skips_undefined_attributes_and_missing_files(tmp_path: Path, legacy_labels: bool) -> None:
     """Records with an undefined attribute, or a missing image file, are dropped."""
     records: list[dict[str, object]] = [
         {"name": "ok.jpg", "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"}},
@@ -177,23 +193,25 @@ def test_bdd_source_skips_undefined_attributes_and_missing_files(tmp_path: Path)
             "_write": False,
         },
     ]
-    _write_bdd_fixture(tmp_path, records)
-    a = BDD100KSource(str(tmp_path)).load()
+    _write_bdd_fixture(tmp_path, records, legacy_labels=legacy_labels)
+    a = BDD100KSource(str(tmp_path), legacy_labels=legacy_labels).load()
     assert a.images.shape[0] == 1  # only the valid, present record survives
 
 
-def test_bdd_source_respects_max_images(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_labels", [True, False])
+def test_bdd_source_respects_max_images(tmp_path: Path, legacy_labels: bool) -> None:
     """The max_images cap bounds how many attribute-valid images are loaded."""
     records: list[dict[str, object]] = [
         {"name": f"{i}.jpg", "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"}}
         for i in range(5)
     ]
-    _write_bdd_fixture(tmp_path, records)
-    a = BDD100KSource(str(tmp_path), max_images=2).load()
+    _write_bdd_fixture(tmp_path, records, legacy_labels=legacy_labels)
+    a = BDD100KSource(str(tmp_path), max_images=2, legacy_labels=legacy_labels).load()
     assert a.images.shape[0] == 2
 
 
-def test_bdd_source_drops_rare_canary_scenes_below_min_count(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_labels", [True, False])
+def test_bdd_source_drops_rare_canary_scenes_below_min_count(tmp_path: Path, legacy_labels: bool) -> None:
     """min_canary_count drops scenes with too few images to support a probe; 0 keeps every scene."""
     records: list[dict[str, object]] = []
     records.extend(
@@ -204,13 +222,13 @@ def test_bdd_source_drops_rare_canary_scenes_below_min_count(tmp_path: Path) -> 
         {"name": f"t{i}.jpg", "attributes": {"timeofday": "night", "weather": "clear", "scene": "tunnel"}}
         for i in range(2)
     )
-    _write_bdd_fixture(tmp_path, records)
+    _write_bdd_fixture(tmp_path, records, legacy_labels=legacy_labels)
     # keep-all: both scenes present
-    keep_all = BDD100KSource(str(tmp_path))
+    keep_all = BDD100KSource(str(tmp_path), legacy_labels=legacy_labels)
     keep_all.load()
     assert keep_all.num_canary_classes == 2
     # threshold 3: the 2-image "tunnel" scene is dropped, its images excluded
-    src = BDD100KSource(str(tmp_path), min_canary_count=3)
+    src = BDD100KSource(str(tmp_path), min_canary_count=3, legacy_labels=legacy_labels)
     filtered = src.load()
     assert src.num_canary_classes == 1
     assert set(filtered.canary_names.values()) == {"city street"}
@@ -221,3 +239,68 @@ def test_bdd_source_raises_on_missing_root(tmp_path: Path) -> None:
     """A missing image directory is a clear FileNotFoundError, not an opaque crash."""
     with pytest.raises(FileNotFoundError, match="BDD100K images not found"):
         BDD100KSource(str(tmp_path / "nope")).load()
+
+
+def test_bdd_per_image_labels_match_legacy_outputs(tmp_path: Path) -> None:
+    """Both formats produce the same images, regimes, scenes, and object category counts."""
+    records: list[dict[str, object]] = [
+        {
+            "name": "a.jpg",
+            "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"},
+            "labels": [{"category": "car"}, {"category": "car"}, {"category": "person"}],
+        },
+        {
+            "name": "b.jpg",
+            "attributes": {"timeofday": "night", "weather": "rainy", "scene": "city street"},
+        },
+    ]
+    legacy_root, per_image_root = tmp_path / "legacy", tmp_path / "per_image"
+    _write_bdd_fixture(legacy_root, records, split="val")
+    _write_bdd_fixture(per_image_root, records, split="val", legacy_labels=False)
+    legacy = BDD100KSource(str(legacy_root), split="val", img_size=16).load()
+    per_image = BDD100KSource(str(per_image_root), split="val", img_size=16, legacy_labels=False).load()
+    assert torch.equal(legacy.images, per_image.images)
+    assert torch.equal(legacy.era_key, per_image.era_key)
+    assert torch.equal(legacy.canary, per_image.canary)
+    assert legacy.regime_order == per_image.regime_order
+    assert legacy.regime_names == per_image.regime_names
+    assert legacy.canary_names == per_image.canary_names
+    assert legacy.object_categories == per_image.object_categories == [{"car": 2, "person": 1}, {}]
+
+
+def test_bdd_per_image_labels_honour_path_overrides(tmp_path: Path) -> None:
+    """Custom image and label directories work, including an already-suffixed image name."""
+    images_dir, labels_dir = tmp_path / "custom_images", tmp_path / "custom_labels"
+    images_dir.mkdir()
+    labels_dir.mkdir()
+    Image.new("RGB", (32, 24)).save(images_dir / "a.jpg")
+    (labels_dir / "a.json").write_text(
+        json.dumps(
+            {
+                "name": "a.jpg",
+                "attributes": {"timeofday": "daytime", "weather": "clear", "scene": "highway"},
+                "frames": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = BDD100KSource(
+        str(tmp_path / "unused"), images_dir=str(images_dir), labels_file=str(labels_dir), legacy_labels=False
+    )
+    loaded = source.load()
+    assert loaded.images.shape[0] == 1
+    assert loaded.object_categories == [{}]
+
+
+def test_bdd_per_image_labels_report_missing_directory(tmp_path: Path) -> None:
+    """A legacy labels file is not silently treated as a per-image labels directory."""
+    _write_bdd_fixture(tmp_path, [])
+    with pytest.raises(FileNotFoundError, match="BDD100K per-image labels not found"):
+        BDD100KSource(str(tmp_path), legacy_labels=False).load()
+
+
+def test_bdd_per_image_labels_report_empty_directory(tmp_path: Path) -> None:
+    """An empty labels directory fails clearly rather than returning an empty corpus."""
+    _write_bdd_fixture(tmp_path, [], legacy_labels=False)
+    with pytest.raises(ValueError, match="no attribute-valid BDD100K images"):
+        BDD100KSource(str(tmp_path), legacy_labels=False).load()
