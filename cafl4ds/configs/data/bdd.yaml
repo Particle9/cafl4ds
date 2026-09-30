@@ -6,6 +6,8 @@ bdd_root: ${bdd_root}
 split: train
 img_size: ${img_size}
 max_images: ${max_images}
+# Combined legacy JSON by default. Use data.legacy_labels=false for labels/100k/<split>/*.json.
+legacy_labels: true
 # Drop scenes (the canary axis) with fewer than this many valid images — BDD's rare scenes (tunnel,
 # gas stations, …) cannot support a balanced held-out probe. 0 keeps every scene. Override per run,
 # e.g. `data.min_canary_count=50` keeps the well-populated scenes (city street / highway / residential).
