@@ -352,12 +352,61 @@ def _run_seed(
         ),
         "conditions": adaptation.condition_report(live_probe, frozen_probe, stream.era_names),
     }
+    report["adaptation"]["evaluation_sizes"] = _evaluation_sizes(stream)
+    if config.get("save_final_well", False):
+        warmup.save_well(method, out_dir / "checkpoints" / f"adapted_s{seed}.pt")
+    panel_seeds = config.get("probe_panel_seeds", [])
+    if panel_seeds:
+        if evaluation_source is None:
+            raise ValueError("Repeated evaluation panels require an independent evaluation source.")
+        panels = []
+        for panel_seed in panel_seeds:
+            panel = instantiate(
+                config.stream, source=source, evaluation_source=evaluation_source, canary_seed=int(panel_seed)
+            )
+            panels.append(_final_panel(method, frozen, panel, int(panel_seed), int(config.condition_knn_k)))
+        report["adaptation"]["probe_panels"] = panels
     logger.info(
         f"seed {seed}: global gains "
         f"kNN={report['adaptation']['global']['knn']['gain']:+.4f}, "
         f"linear={report['adaptation']['global']['linear']['gain']:+.4f}"
     )
     return report, stream.era_names, stream.era_composition()
+
+
+def _evaluation_sizes(stream: RegimeStream) -> dict[str, Any]:
+    """Record actual query counts, including sparse condition cells."""
+    return {
+        "support": len(stream.eval_sets.probe_support.labels),
+        "global_query": len(stream.eval_sets.probe_query.labels),
+        "per_condition_query": {str(era): len(data.labels) for era, data in stream.eval_sets.per_era.items()},
+    }
+
+
+def _final_panel(
+    method: SSLMethod, frozen: SSLMethod, stream: RegimeStream, panel_seed: int, knn_k: int
+) -> dict[str, Any]:
+    """Re-evaluate final models on a predeclared support/query reservation without updating them."""
+    training_modes = method.training, frozen.training
+    method.eval()
+    frozen.eval()
+    try:
+        live_probe = PerEraProbe(stream.eval_sets, probe="linear", knn_k=knn_k)
+        frozen_probe = PerEraProbe(stream.eval_sets, probe="linear", knn_k=knn_k)
+        final_era = max(stream.era_names)
+        live_probe.record(method.encode, final_era)
+        frozen_probe.record(frozen.encode, final_era)
+        return {
+            "panel_seed": panel_seed,
+            "global": _global_scores(method, frozen, stream, knn_k),
+            "final_per_condition": adaptation.condition_report(live_probe, frozen_probe, stream.era_names)[
+                "final_per_condition"
+            ],
+            "evaluation_sizes": _evaluation_sizes(stream),
+        }
+    finally:
+        method.train(training_modes[0])
+        frozen.train(training_modes[1])
 
 
 def _write_condition_csv(path: Path, seed_reports: list[dict[str, Any]]) -> Path:
