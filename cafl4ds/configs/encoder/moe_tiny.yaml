@@ -1,0 +1,14 @@
+# Tiny MoE ViT backbone.
+_target_: cafl4ds.models.moe.MoETinyViTEncoder
+img_size: ${img_size}
+patch_size: 8
+in_chans: 3
+embed_dim: 96
+depth: 4
+num_heads: 3
+mlp_ratio: 2.0
+num_experts: 4
+top_k: 1
+moe_blocks: [2, 3]
+routing_level: token
+balancing_mode: batch
