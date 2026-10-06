@@ -179,16 +179,35 @@ class SimSiam(SSLMethod):
         """
         view_1, view_2 = self.two_view(imgs)
         z1 = self.projector(self.encoder.embed(view_1))
+
+        probs1 = None
+        if hasattr(self.encoder, "moe_blocks") and getattr(self.encoder, "cross_view_consistency", False):
+            probs1 = [self.encoder.blocks[i].mlp.router_probs for i in self.encoder.moe_blocks]
+
         z2 = self.projector(self.encoder.embed(view_2))
+
+        probs2 = None
+        if hasattr(self.encoder, "moe_blocks") and getattr(self.encoder, "cross_view_consistency", False):
+            probs2 = [self.encoder.blocks[i].mlp.router_probs for i in self.encoder.moe_blocks]
         if not self.anti_collapse:
             # Forced-collapse PC (P0.2): predictor bypassed (p = z), stop-gradient off.
             return 0.5 * (_neg_cosine(z1, z2, stop_grad=False) + _neg_cosine(z2, z1, stop_grad=False))
         loss_healthy = self._healthy_loss(z1, z2)
         if self.collapse_alpha <= 0.0:
-            return loss_healthy
-        # Loss-blend knob: mix in the forced-collapse objective (bypass + no stop-gradient).
-        loss_collapse = 0.5 * (_neg_cosine(z1, z2, stop_grad=False) + _neg_cosine(z2, z1, stop_grad=False))
-        return (1.0 - self.collapse_alpha) * loss_healthy + self.collapse_alpha * loss_collapse
+            loss = loss_healthy
+        else:
+            # Loss-blend knob: mix in the forced-collapse objective (bypass + no stop-gradient).
+            loss_collapse = 0.5 * (_neg_cosine(z1, z2, stop_grad=False) + _neg_cosine(z2, z1, stop_grad=False))
+            loss = (1.0 - self.collapse_alpha) * loss_healthy + self.collapse_alpha * loss_collapse
+
+        if probs1 is not None and probs2 is not None:
+            # Add CR-MoE cross-view routing consistency regularizer
+            consistency_loss = 0.0
+            for p1, p2 in zip(probs1, probs2, strict=False):
+                consistency_loss += torch.nn.functional.mse_loss(p1, p2)
+            loss += consistency_loss
+
+        return loss
 
     def _healthy_loss(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
         """The healthy SimSiam loss on two projector outputs, with the soft-stop-gradient knob.

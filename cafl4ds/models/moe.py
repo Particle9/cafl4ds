@@ -54,7 +54,8 @@ class MoEMlp(nn.Module):
             self.router_probs = router_probs
             
         top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
-        top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
+        if self.top_k > 1:
+            top_k_probs = top_k_probs / (top_k_probs.sum(dim=-1, keepdim=True) + 1e-9)
         
         # Auxiliary loss computation
         self.aux_loss = 0.0
@@ -183,6 +184,7 @@ class MoETinyViTEncoder(TinyViTEncoder):
 
     @torch.no_grad()
     def routing(self, imgs: torch.Tensor) -> list[torch.Tensor]:
+        imgs = imgs.to(self.pos_embed.device)
         self.forward(imgs)
         
         probs = []

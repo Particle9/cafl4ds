@@ -129,6 +129,8 @@ class HealthMonitor:
                 metrics["clusterability"] = self._clusterability(surfaces["backbone"])
             if self.run_attn_distance:
                 metrics.update(self._attn_distance(method))
+            if hasattr(method.encoder, "routing"):
+                metrics.update(self._routing(method))
             if self.run_alignment_strong:
                 metrics.update(self._alignment_strong(method))
             if self.run_knn:
@@ -318,3 +320,25 @@ class HealthMonitor:
             f"cka_drift{s}": measurements.cka_drift(ref, z_query),
             f"cosine_drift{s}": measurements.cosine_drift(ref, z_query),
         }
+
+    def _routing(self, method: SSLMethod) -> dict[str, float]:
+        """Minimal routing columns: per-layer expert load and mean routing entropy."""
+        encoder = method.encoder
+        probs = encoder.routing(self.eval_sets.probe_query.images)
+        metrics = {}
+        total_entropy = 0.0
+        for i, block_probs in enumerate(probs):
+            # block_probs: [B, T, E]
+            load = block_probs.mean(dim=(0, 1))
+            for j, val in enumerate(load):
+                metrics[f"route_load_l{i}_e{j}"] = float(val.item())
+                
+            eps = 1e-9
+            entropy = -(block_probs * torch.log(block_probs + eps)).sum(dim=-1).mean()
+            metrics[f"route_token_entropy_l{i}"] = float(entropy.item())
+            total_entropy += float(entropy.item())
+            
+        if len(probs) > 0:
+            metrics["route_token_entropy"] = total_entropy / len(probs)
+            
+        return metrics

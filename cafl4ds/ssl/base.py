@@ -30,14 +30,27 @@ from cafl4ds.models.vit import TinyViTEncoder
 class SSLMethod(nn.Module, ABC):  # type: ignore[misc]  # nn.Module is Any without torch stubs (mypy hook env)
     """A self-supervised method: a shared encoder plus a training objective."""
 
-    def __init__(self, encoder: TinyViTEncoder) -> None:
+    def __init__(self, encoder: TinyViTEncoder, aux_weight: float = 1.0) -> None:
         """Store the shared backbone encoder.
 
         Args:
             encoder: The :class:`~cafl4ds.models.vit.TinyViTEncoder` backbone under study.
+            aux_weight: The weight applied to the encoder's auxiliary loss (if any).
         """
         super().__init__()
         self.encoder = encoder
+        self.aux_weight = aux_weight
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if 'training_step' in cls.__dict__:
+            original_step = cls.training_step
+            def training_step(self, imgs: torch.Tensor) -> torch.Tensor:
+                loss = original_step(self, imgs)
+                if hasattr(self.encoder, "aux_loss"):
+                    loss = loss + self.aux_weight * self.encoder.aux_loss
+                return loss
+            cls.training_step = training_step
 
     @property
     @abstractmethod
@@ -179,6 +192,35 @@ def save_encoder_checkpoint(encoder: TinyViTEncoder, checkpoint: str | Path) -> 
     torch.save(state, path)
     logger.info(f"saved pretrained encoder weights to {path}")
 
+def load_upcycled_checkpoint(encoder: TinyViTEncoder, checkpoint: str | Path) -> None:
+    """Load a dense checkpoint and apply sparse upcycling to MoE blocks.
+    
+    Args:
+        encoder: The MoE encoder to initialize.
+        checkpoint: Path to the dense warm-start checkpoint.
+    """
+    path = Path(checkpoint)
+    if not path.is_file():
+        raise FileNotFoundError(f"pretrained checkpoint not found: {path}")
+    state = torch.load(path, map_location="cpu")
+    adapted_state = {}
+    for k, v in state.items():
+        if 'mlp.' in k:
+            block_idx = int(k.split('blocks.')[1].split('.')[0])
+            if hasattr(encoder, 'moe_blocks') and block_idx in encoder.moe_blocks:
+                num_experts = encoder.blocks[block_idx].mlp.num_experts
+                for e in range(num_experts):
+                    new_k = k.replace('mlp.', f'mlp.experts.{e}.')
+                    adapted_state[new_k] = v.clone()
+            else:
+                adapted_state[k] = v
+        else:
+            adapted_state[k] = v
+            
+    encoder.load_state_dict(adapted_state, strict=False)
+    logger.info(f"applied sparse upcycling from dense checkpoint {path}")
+
+
 
 def apply_encoder_init(
     encoder: TinyViTEncoder, mode: str = "from_scratch", checkpoint: str | Path | None = None
@@ -187,10 +229,10 @@ def apply_encoder_init(
 
     Args:
         encoder: The encoder to initialize.
-        mode: ``"from_scratch"`` (keep the random init) or ``"pretrained"`` (warm-start from
-            ``checkpoint``).
+        mode: ``"from_scratch"`` (keep the random init), ``"pretrained"`` (warm-start from
+            ``checkpoint``), or ``"upcycled"`` (sparse upcycling from a dense checkpoint).
         checkpoint: Path to the warm-start checkpoint; required when ``mode`` is
-            ``"pretrained"``.
+            ``"pretrained"`` or ``"upcycled"``.
 
     Raises:
         ValueError: If ``mode`` is unknown, or ``"pretrained"`` without a ``checkpoint``.
@@ -203,4 +245,10 @@ def apply_encoder_init(
             raise ValueError("init mode 'pretrained' requires a checkpoint path.")
         load_encoder_checkpoint(encoder, checkpoint)
         return
-    raise ValueError(f"unknown init mode {mode!r}; expected 'from_scratch' or 'pretrained'.")
+    if mode == "upcycled":
+        if checkpoint is None:
+            raise ValueError("init mode 'upcycled' requires a checkpoint path.")
+        load_upcycled_checkpoint(encoder, checkpoint)
+        return
+
+    raise ValueError(f"unknown init mode {mode!r}; expected 'from_scratch', 'pretrained', or 'upcycled'.")
