@@ -18,6 +18,7 @@ dependencies = [
     "omegaconf>=2.3.0",
     "loguru>=0.7.3",
     "numpy>=1.26",
+    "scipy>=1.11",
     "scikit-learn>=1.4",
 ]
 
@@ -272,11 +273,11 @@ args = [
 cmd = "nox -s tests"
 help = "Run tests across all supported Python versions via nox."
 
-# Export test artifacts
+# Export test artifacts using the bundled SVG templates.
 [tool.poe.tasks.export-test-artifacts]
 sequence = [
-  { cmd = "genbadge tests -i ${directory}/pytest.xml -o ${directory}/tests.svg" },
-  { cmd = "genbadge coverage -i ${directory}/coverage.xml -o ${directory}/coverage.svg" },
+  { cmd = "genbadge tests --local -i ${directory}/pytest.xml -o ${directory}/tests.svg" },
+  { cmd = "genbadge coverage --local -i ${directory}/coverage.xml -o ${directory}/coverage.svg" },
 ]
 help = "Generate test/coverage badges from exported artifacts"
 args = [

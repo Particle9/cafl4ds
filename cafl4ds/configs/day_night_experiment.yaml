@@ -1,0 +1,10 @@
+defaults:
+  - cluster_routing_experiment
+  - _self_
+
+experiment_id: M6.3.0
+output: outputs/m6_3_0
+# Each time partition contributes exactly one pass.
+epochs: 1
+stream_order: day_dusk_then_night
+pilot_images_per_phase: null

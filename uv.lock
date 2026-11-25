@@ -378,6 +378,9 @@ dependencies = [
     { name = "omegaconf" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
 [package.optional-dependencies]
@@ -431,6 +434,7 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.3.0" },
     { name = "optimum-habana", marker = "extra == 'gaudi'", specifier = "==1.20.0" },
     { name = "scikit-learn", specifier = ">=1.4" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cafl4ds", extra = "cpu" } },
     { name = "torch", marker = "extra == 'cu124'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cu124", conflict = { package = "cafl4ds", extra = "cu124" } },
     { name = "torchvision", marker = "extra == 'cpu'", specifier = ">=0.17", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "cafl4ds", extra = "cpu" } },

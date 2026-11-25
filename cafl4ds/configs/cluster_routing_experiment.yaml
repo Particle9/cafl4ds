@@ -1,0 +1,39 @@
+defaults:
+  - encoder: moe_tiny
+  - ssl: mae
+  - optim: adamw
+  - routing_source@source: bdd_cache
+  - _self_
+
+encoder:
+  top_k: 4
+  routing_level: image
+img_size: 64
+experiment_id: M6.1.0
+expert_lr_scaling: false
+baseline_directory: null
+device: cpu
+threads: 4
+workers: 2  # Independent seed pairs; each worker reads the existing image mmap.
+seeds: [0, 1, 2, 3, 4]
+epochs: 2
+batch_size: 64
+eval_every: 50
+mask_draws: 4
+support_per_class: 50
+query_per_class: 50
+natural_query_size: 200
+split_seed: 1729
+grad_clip: 1.0
+regime_eval_per: 32
+stream_order: regime_blocked
+gmm_directory: outputs/wp_m6_0_0
+bdd_root: null  # Defaults to the verified training cache's original BDD root.
+max_steps: null
+output: outputs/m6_1_0
+
+hydra:
+  run:
+    dir: ${output}/hydra
+  job:
+    chdir: false

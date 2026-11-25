@@ -1,0 +1,8 @@
+defaults:
+  - cluster_routing_expert_lr_experiment
+  - _self_
+
+arms: [gmm]
+expert_lr_cap: null
+baseline_directory: outputs/m6_2_0
+output: outputs/m6_2_0_gmm_uncapped

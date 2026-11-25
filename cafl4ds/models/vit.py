@@ -122,6 +122,12 @@ class Mlp(nn.Module):  # type: ignore[misc]  # nn.Module is Any without torch st
         return FeedForwardOutput(self(x), x.new_zeros(()))
 
 
+def mix_all_experts(experts: nn.ModuleList, x: torch.Tensor, probabilities: torch.Tensor) -> torch.Tensor:
+    """Apply every expert with full normalized weights, without sparse gather/scatter."""
+    outputs = torch.stack([expert(x) for expert in experts], dim=-2)
+    return cast(torch.Tensor, (outputs * probabilities.to(outputs.dtype).unsqueeze(-1)).sum(dim=-2))
+
+
 class MoEMlp(nn.Module):  # type: ignore[misc]
     """Sparse top-k experts with batch importance/load balancing.
 
@@ -211,6 +217,9 @@ class MoEMlp(nn.Module):  # type: ignore[misc]
             expert_ids = expert_ids[:, None, :].expand(-1, n, -1)
             weights = weights[:, None, :].expand(-1, n, -1)
             probs = probs[:, None, :].expand(-1, n, -1)
+        if self.top_k == self.num_experts:
+            full_probs = probs.reshape(b, n, self.num_experts)
+            return FeedForwardOutput(mix_all_experts(self.experts, x, full_probs), aux_loss, full_probs)
         tokens = x.reshape(b * n, d)
         expert_ids = expert_ids.reshape(b * n, self.top_k)
         weights = weights.reshape(b * n, self.top_k)

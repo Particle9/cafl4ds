@@ -29,14 +29,18 @@ def test_all_images_are_discovered_without_annotations(tmp_path: Path) -> None:
 def test_extraction_resume_and_cache_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Resume avoids recomputation and rejects changed input files instead of misaligning IDs."""
     root, output = tmp_path / "bdd", tmp_path / "result"
-    for split in ("train", "val", "test"):
+    for split, red in zip(("train", "val", "test"), (10, 90, 170), strict=True):
         directory = root / "images" / "100k" / split
         directory.mkdir(parents=True)
-        Image.new("RGB", (300, 200), color=(10, 30, 50)).save(directory / "image.jpg")
+        Image.new("RGB", (300, 200), color=(red, 30, 50)).save(directory / "image.jpg")
+
+    batch_sizes: list[int] = []
 
     class FakeEncoder:
         def __call__(self, images: torch.Tensor) -> torch.Tensor:
-            return images.mean(dim=(1, 2, 3))[:, None].expand(-1, EMBED_DIM)
+            batch_sizes.append(len(images))
+            # Index a pixel so the fake features stay identical when the resumed batches change size.
+            return images[:, 0, 0, 0, None].expand(-1, EMBED_DIM)
 
     monkeypatch.setattr("cafl4ds.offline_clustering.build_encoder", lambda _: FakeEncoder())
     manifest = extract_embeddings(root, output, device="cpu", batch_size=2, workers=0)
@@ -49,7 +53,9 @@ def test_extraction_resume_and_cache_identity(tmp_path: Path, monkeypatch: pytes
     partial = np.load(output / "embeddings.npy", mmap_mode="r+")
     partial[1:] = np.nan
     partial.flush()
+    batch_sizes.clear()
     extract_embeddings(root, output, device="cpu", batch_size=2, workers=0)
+    assert batch_sizes == [2]
     np.testing.assert_array_equal(saved, np.load(output / "embeddings.npy"))
     monkeypatch.setattr("cafl4ds.offline_clustering.build_encoder", lambda _: pytest.fail("Cache was not reused"))
     assert extract_embeddings(root, output, device="cpu", workers=0)["fingerprint"] == manifest["fingerprint"]

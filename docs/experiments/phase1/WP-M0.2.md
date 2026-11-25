@@ -219,10 +219,8 @@ UV_CACHE_DIR=/private/tmp/cafl4ds-routing-uv uv run --no-sync python scripts/run
 UV_CACHE_DIR=/private/tmp/cafl4ds-routing-uv uv run --no-sync python scripts/analyze_routing_experiment.py --output outputs/moe_routing_entropy_regime_2026-10-27 --compare-with outputs/moe_routing_entropy_2026-10-19
 ```
 
-Configuration: [`routing_regime_experiment.yaml`](../../../cafl4ds/configs/routing_regime_experiment.yaml). The
-inherited base config supplies the complete WP-M0.1 recipe. Ordering is implemented in
-[`routing_streams.py`](../../../cafl4ds/routing_streams.py); matched condition comparisons are implemented in
-[`routing_order_analysis.py`](../../../cafl4ds/routing_order_analysis.py).
+`cafl4ds/configs/routing_regime_experiment.yaml` inherits the complete WP-M0.1 recipe. `cafl4ds/routing_streams.py`
+orders the stream, and `cafl4ds/routing_order_analysis.py` compares the matched conditions.
 
 Raw outputs are under `outputs/moe_routing_entropy_regime_2026-10-27/`, using the same per-seed/per-arm format as
 WP-M0.1. Additional files are `reference_check.json`, its reproducible `check_reference.py`, and `stream_manifest.json`.

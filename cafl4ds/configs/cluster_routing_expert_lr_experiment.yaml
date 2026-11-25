@@ -1,0 +1,8 @@
+defaults:
+  - cluster_routing_experiment
+  - _self_
+
+experiment_id: M6.2.0
+expert_lr_scaling: true
+baseline_directory: outputs/m6_1_0
+output: outputs/m6_2_0

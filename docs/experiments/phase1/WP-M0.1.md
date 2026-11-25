@@ -205,10 +205,9 @@ all three arms for every measured seed.
 Promoted artifacts use `artifacts/WP-M0.1/` and the `WP-M0.1-v1` comparison schema identifier. Archived raw outputs and
 frozen provenance retain their recorded paths and contents.
 
-The [design](../moe-routing-entropy-filtering-plan.md) records decisions and interpretive limits. The runner is
-[`scripts/run_routing_experiment.py`](../../../scripts/run_routing_experiment.py), with business logic in
-[`cafl4ds/routing_experiment.py`](../../../cafl4ds/routing_experiment.py) and configuration in
-[`routing_experiment.yaml`](../../../cafl4ds/configs/routing_experiment.yaml).
+The [design](../moe-routing-entropy-filtering-plan.md) records decisions and interpretive limits.
+`scripts/run_routing_experiment.py` runs the training harness in `cafl4ds/routing_experiment.py` using
+`cafl4ds/configs/routing_experiment.yaml`.
 
 ```bash
 UV_CACHE_DIR=/private/tmp/cafl4ds-routing-uv uv run --no-sync python scripts/run_routing_experiment.py

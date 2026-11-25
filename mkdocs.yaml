@@ -108,6 +108,15 @@ nav:
       - WP-M0.1 Shuffled routing entropy filtering: experiments/phase1/WP-M0.1.md
       - WP-M0.2 Regime-blocked routing entropy filtering: experiments/phase1/WP-M0.2.md
 
+  - Mixture-of-experts studies:
+      - MoE ViT architecture: moe.md
+      - WP-M6.0.0 Offline clustering: experiments/WP-M6.0.0-offline-clustering.md
+      - M6.1.0 Image routing: experiments/M6.1.0-image-routing-mae.md
+      - M6.2.0 Expert learning rates: experiments/M6.2.0-expert-learning-rates.md
+      - M6.3.0 Day-to-night forgetting: experiments/M6.3.0-day-night-forgetting.md
+      - M6.4.0 Weather transfer probe: experiments/M6.4.0-day-night-weather-probe.md
+      - M6.4.1 Pooled weather probe: experiments/M6.4.1-pooled-weather-probe.md
+
   - Audits:
       - P0.2 (collapse mode): experiments/audits/P0.2.md
       - P0.3 (forgetting mode): experiments/audits/P0.3.md
