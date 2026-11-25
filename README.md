@@ -11,6 +11,8 @@ Continuous, Active Federated Learning for Data Streams
 
 ## Documentation
 
+Browse the [research notebooks by topic](notebooks/README.md).
+
 Refer to the full documentation [here](https://aidotse.github.io/cafl4ds/user-guide/)
 
 ## Authors

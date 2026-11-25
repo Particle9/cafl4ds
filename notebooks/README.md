@@ -1,4 +1,22 @@
-# Experiment notebooks
+# Research notebooks
+
+| Topic | Notebooks | Coverage |
+| -- | -: | -- |
+| [Foundations](selected/foundations/) | 3 | Early SSL filtering, representation-health measurements, and forecast baselines. |
+| [Single-image admission](selected/single-image-admission/) | 16 | Image-level filtering, online objective prediction, and learning-rate choices. |
+| [Transition models and MPC](selected/transition-models-and-mpc/) | 38 | Action-response forecasts, rate rollouts, paired plans, and predictor benchmarks. |
+| [Capability and action response](selected/capability-and-response/) | 20 | Representation retention, delayed benefit, and budget-matched adaptation. |
+| [Health-guided replay](selected/health-guided-replay/) | 14 | Replay composition, memory banks, and health-constrained update allocation. |
+| [O3 control](selected/o3-control/) | 37 | O3 action selection, replay controls, distribution shifts, and model-component allocation. |
+| [DINO](selected/dino/) | 23 | Teacher and student timescales, adaptation depth, and semantic acquisition. |
+| [Masked autoencoders](selected/mae/) | 37 | MAE reconstruction, geometry, counterfactual forecasts, and multi-step control. |
+| [SimSiam and temporal learning](selected/simsiam-and-temporal/) | 16 | SimSiam objectives, within-clip forecasts, and object correspondence. |
+| [Semantic adaptation](selected/semantic-adaptation/) | 23 | Learnability, retention, replay attribution, and transfer across regimes. |
+
+Each topic index lists the notebooks by experiment ID or filename. Keep the experiment ID in the filename when adding a
+notebook.
+
+## Visualizing saved runs
 
 Install the analysis environment from the repository root:
 

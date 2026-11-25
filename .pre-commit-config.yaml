@@ -8,6 +8,12 @@ repos:
         # 2 MB: a full uv.lock for this toolchain already lands ~1 MB and grows as
         # Renovate bumps the dep tree; 1024 would reject it. Still catches stray blobs.
         args: ['--maxkb=2048']
+        exclude: ^notebooks/selected/[^/]+/[^/]+\.ipynb$
+      - id: check-added-large-files
+        name: check selected notebook sizes
+        # Saved experiment notebooks embed figures needed for review in GitHub.
+        args: ['--maxkb=10240']
+        files: ^notebooks/selected/[^/]+/[^/]+\.ipynb$
       - id: check-ast
       - id: check-builtin-literals
       - id: check-case-conflict
@@ -63,9 +69,10 @@ repos:
     rev: v0.12.7
     hooks:
       - id: ruff-format
-        exclude: ^docs/
+        # Archived notebooks retain the code and outputs recorded for each experiment.
+        exclude: ^(?:docs/|notebooks/selected/.*\.ipynb$)
       - id: ruff
-        exclude: ^docs/
+        exclude: ^(?:docs/|notebooks/selected/.*\.ipynb$)
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.17.1
